@@ -1,27 +1,41 @@
 --[[
     RoundManager
     ────────────
-    Orchestrates the lifecycle of a single game round via a state machine.
-    Drives OutfitSystem → VotingSystem → SabotageSystem in sequence.
-    No timer-based transitions yet – phases are advanced by explicit calls
-    (timers will be added in Phase 1).
+    Drives the complete per-round gameplay loop as a state machine.
 
     State machine:
-        IDLE → DRESSING → VOTING → RESULTS → IDLE
+        IDLE → LOBBY → THEME_SELECTION → DRESSING → RUNWAY → VOTING → RESULTS → IDLE
 
-    Dependencies (injected via Init):
-        OutfitSystem, VotingSystem, SabotageSystem, Logger
+    Every state transition:
+        1. Updates _currentState
+        2. Fires PhaseChanged(stateName, phaseDurationSeconds) to ALL clients
+        3. Schedules the next transition with task.delay (cancellable)
+
+    The only external call needed to start a round is StartRound(players).
+    All internal transitions are automatic.
+
+    Phase durations (seconds):
+        LOBBY          : 10   (waiting room / countdown)
+        THEME_SELECTION:  5   (theme reveal)
+        DRESSING       : 180  (3-minute outfit phase)
+        RUNWAY         : dynamic (RunwaySystem drives it; ~10s per player)
+        VOTING         : 30
+        RESULTS        : 15
+
+    Dependencies (injected via Init as a single deps table):
+        outfitSystem, votingSystem, sabotageSystem,
+        themeSystem, runwaySystem, aiJudge,
+        logger, remotes
 
     Public API:
-        RoundManager.Init(outfitSystem, votingSystem, sabotageSystem, logger)
+        RoundManager.Init(deps)
         RoundManager.Start()
         RoundManager.Stop()
         RoundManager.StartRound(players)
-        RoundManager.BeginVoting(players)
-        RoundManager.EndRound()
         RoundManager.GetCurrentState()  -> string
         RoundManager.GetRoundNumber()   -> number
-        RoundManager.State              -> { IDLE, DRESSING, VOTING, RESULTS }
+        RoundManager.State              -> { IDLE, LOBBY, THEME_SELECTION,
+                                             DRESSING, RUNWAY, VOTING, RESULTS }
 --]]
 
 local RoundManager = {}
@@ -29,133 +43,255 @@ local RoundManager = {}
 -- ── State enum ───────────────────────────────────────────────────────────────
 
 RoundManager.State = {
-    IDLE     = "IDLE",
-    DRESSING = "DRESSING",
-    VOTING   = "VOTING",
-    RESULTS  = "RESULTS",
+    IDLE             = "IDLE",
+    LOBBY            = "LOBBY",
+    THEME_SELECTION  = "THEME_SELECTION",
+    DRESSING         = "DRESSING",
+    RUNWAY           = "RUNWAY",
+    VOTING           = "VOTING",
+    RESULTS          = "RESULTS",
+}
+
+-- ── Phase durations ───────────────────────────────────────────────────────────
+
+local DURATION = {
+    LOBBY           = 10,
+    THEME_SELECTION = 5,
+    DRESSING        = 180,
+    VOTING          = 30,
+    RESULTS         = 15,
 }
 
 -- ── Private state ────────────────────────────────────────────────────────────
 
-local _outfitSystem   = nil
-local _votingSystem   = nil
-local _sabotageSystem = nil
-local _logger         = nil
-
+local _d            = {}   -- deps table (set by Init)
 local _isRunning    = false
 local _currentState = RoundManager.State.IDLE
 local _roundNumber  = 0
+local _phaseThread  = nil  -- cancellable task thread for timed transitions
+local _roundPlayers = {}   -- Player[] for the active round
 
 -- ── Internal helpers ─────────────────────────────────────────────────────────
 
-local function setState(newState)
-    _logger.info("RoundManager",
-        "State transition: " .. tostring(_currentState) .. " → " .. tostring(newState))
+local function cancelPhaseTimer()
+    if _phaseThread then
+        task.cancel(_phaseThread)
+        _phaseThread = nil
+    end
+end
+
+--- Transitions to a new state and broadcasts to all clients.
+--- phaseDuration is informational for the client timer UI; pass 0 for
+--- phases whose duration is driven externally (RUNWAY).
+local function setState(newState, phaseDuration)
+    _d.logger.info("RoundManager",
+        "Phase: " .. _currentState .. " → " .. newState)
     _currentState = newState
+    _d.remotes.PhaseChanged:FireAllClients(newState, phaseDuration or 0)
+end
+
+-- ── Phase functions (forward-declared so they can reference each other) ───────
+
+local phaseLobby, phaseThemeSelection, phaseDressing,
+      phaseRunway, phaseVoting, phaseResults
+
+-- ─────────────────────────────────────────────────────────────────────────────
+
+phaseLobby = function()
+    setState(RoundManager.State.LOBBY, DURATION.LOBBY)
+    _d.logger.info("RoundManager",
+        "Lobby open – " .. DURATION.LOBBY .. "s before theme reveal. "
+        .. #_roundPlayers .. " player(s).")
+
+    _phaseThread = task.delay(DURATION.LOBBY, phaseThemeSelection)
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+
+phaseThemeSelection = function()
+    setState(RoundManager.State.THEME_SELECTION, DURATION.THEME_SELECTION)
+
+    local theme = _d.themeSystem.SelectTheme()
+    -- Broadcast: (themeName, themeDescription, themeTags[])
+    _d.remotes.ThemeSelected:FireAllClients(theme.name, theme.description, theme.tags)
+    _d.logger.info("RoundManager", 'Theme: "' .. theme.name .. '"')
+
+    _phaseThread = task.delay(DURATION.THEME_SELECTION, phaseDressing)
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+
+phaseDressing = function()
+    setState(RoundManager.State.DRESSING, DURATION.DRESSING)
+
+    -- Clear last round's outfits so stale data can't carry over
+    _d.outfitSystem.ClearRoundOutfits(_roundPlayers)
+    _d.outfitSystem.Start()
+    _d.sabotageSystem.Start()
+
+    _d.logger.info("RoundManager",
+        "Dressing phase – " .. DURATION.DRESSING .. "s on the clock.")
+
+    _phaseThread = task.delay(DURATION.DRESSING, function()
+        _d.outfitSystem.Stop()
+        phaseRunway()
+    end)
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+
+phaseRunway = function()
+    setState(RoundManager.State.RUNWAY, 0)  -- duration is player-count dependent
+    _d.logger.info("RoundManager", "Runway phase starting.")
+
+    -- RunwaySystem drives timing internally; calls the callback when done
+    _d.runwaySystem.StartRunway(_roundPlayers, function()
+        phaseVoting()
+    end)
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+
+phaseVoting = function()
+    setState(RoundManager.State.VOTING, DURATION.VOTING)
+
+    _d.votingSystem.Start()
+    _d.votingSystem.OpenVoting(_roundPlayers, _roundPlayers)
+    _d.logger.info("RoundManager", "Voting phase – " .. DURATION.VOTING .. "s.")
+
+    _phaseThread = task.delay(DURATION.VOTING, phaseResults)
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+
+phaseResults = function()
+    _d.votingSystem.CloseVoting()
+    setState(RoundManager.State.RESULTS, DURATION.RESULTS)
+
+    local theme    = _d.themeSystem.GetCurrentTheme()
+    local voteTally = _d.votingSystem.TallyVotes()  -- []{userId,voteCount,totalStars,average}
+
+    -- Build a lookup: userId -> average player vote
+    local avgByPlayer = {}
+    for _, entry in ipairs(voteTally) do
+        avgByPlayer[entry.userId] = entry.average
+    end
+
+    -- Combine player votes with AI judge scores
+    local finalResults = {}
+    for _, player in ipairs(_roundPlayers) do
+        local userId    = player.UserId
+        local outfit    = _d.outfitSystem.GetPlayerOutfit(userId)
+        local aiScore   = _d.aiJudge.ScoreOutfit(outfit, theme)
+        local pVoteAvg  = avgByPlayer[userId] or 0
+
+        -- Weighted formula: 60% player vote (normalised to 10-pt scale) + 40% AI
+        local normVote  = (pVoteAvg / 5) * 10
+        local final     = math.floor((normVote * 0.6 + aiScore * 0.4) * 10 + 0.5) / 10
+
+        table.insert(finalResults, {
+            userId     = userId,
+            name       = player.Name,
+            aiScore    = aiScore,
+            playerVote = pVoteAvg,
+            finalScore = final,
+        })
+    end
+
+    table.sort(finalResults, function(a, b)
+        return a.finalScore > b.finalScore
+    end)
+
+    -- Assign ranks and update reputation
+    for rank, result in ipairs(finalResults) do
+        result.rank = rank
+
+        -- Reputation delta: +10 for 1st, +6 for 2nd, +3 for 3rd, +1 otherwise
+        local repDelta = ({ 10, 6, 3 })[rank] or 1
+        local data = _d.playerDataManager.GetPlayerData(result.userId)
+        if data then
+            data.ReputationScore = data.ReputationScore + repDelta
+        end
+
+        _d.logger.info("RoundManager", string.format(
+            "  #%d %-20s  Final: %.1f  (AI: %.1f | Vote: %.1f | Rep +%d)",
+            rank, result.name, result.finalScore,
+            result.aiScore, result.playerVote, repDelta))
+    end
+
+    -- Broadcast results to all clients
+    _d.remotes.RoundResults:FireAllClients(finalResults)
+    _d.logger.info("RoundManager", "Round #" .. _roundNumber .. " results broadcast.")
+
+    -- Clean up subsystems
+    _d.votingSystem.Stop()
+    _d.sabotageSystem.Stop()
+
+    _phaseThread = task.delay(DURATION.RESULTS, function()
+        setState(RoundManager.State.IDLE, 0)
+        _d.logger.info("RoundManager", "=== Round #" .. _roundNumber .. " COMPLETE ===")
+    end)
 end
 
 -- ── Public API ───────────────────────────────────────────────────────────────
 
---- Initialises the module with its dependencies.
---- @param outfitSystem   table
---- @param votingSystem   table
---- @param sabotageSystem table
---- @param logger         table
-function RoundManager.Init(outfitSystem, votingSystem, sabotageSystem, logger)
-    _outfitSystem   = outfitSystem
-    _votingSystem   = votingSystem
-    _sabotageSystem = sabotageSystem
-    _logger         = logger
-    _logger.info("RoundManager", "Initialized.")
+--- Initialises the module with all dependencies.
+--- @param deps table {
+---   outfitSystem, votingSystem, sabotageSystem,
+---   themeSystem, runwaySystem, aiJudge,
+---   playerDataManager, logger, remotes
+--- }
+function RoundManager.Init(deps)
+    _d = deps
+    _d.logger.info("RoundManager", "Initialized.")
 end
 
---- Arms the manager so StartRound can be called.
+--- Arms the manager so StartRound() will be accepted.
 function RoundManager.Start()
     _isRunning = true
-    _logger.info("RoundManager", "Started. Awaiting first round.")
+    _d.logger.info("RoundManager", "Started. Awaiting first round.")
 end
 
---- Gracefully stops the manager, ending any in-progress round first.
+--- Cleanly shuts down, stopping any in-progress round.
 function RoundManager.Stop()
+    cancelPhaseTimer()
     if _currentState ~= RoundManager.State.IDLE then
-        _logger.info("RoundManager", "Stopping mid-round – forcing EndRound.")
-        RoundManager.EndRound()
+        _d.outfitSystem.Stop()
+        _d.votingSystem.Stop()
+        _d.sabotageSystem.Stop()
+        _d.runwaySystem.Stop()
     end
     _isRunning    = false
     _currentState = RoundManager.State.IDLE
-    _logger.info("RoundManager", "Stopped.")
+    _d.logger.info("RoundManager", "Stopped.")
 end
 
---- Begins a new round and opens the DRESSING phase.
---- No-ops with a warning if a round is already active.
---- @param players  Player[]  All participating players
+--- Kicks off a new round for the given player list.
+--- No-ops (with a warning) if the manager is stopped or a round is active.
+--- @param players  Player[]
 function RoundManager.StartRound(players)
     if not _isRunning then
-        _logger.warn("RoundManager", "StartRound called while manager is not running.")
+        _d.logger.warn("RoundManager", "StartRound called while manager is stopped.")
         return
     end
     if _currentState ~= RoundManager.State.IDLE then
-        _logger.warn("RoundManager", "StartRound called during active round (state: "
-            .. _currentState .. ") – ignoring.")
+        _d.logger.warn("RoundManager",
+            "StartRound called during active round (state: " .. _currentState .. ").")
+        return
+    end
+    if #players < 1 then
+        _d.logger.warn("RoundManager", "StartRound called with no players – aborting.")
         return
     end
 
-    _roundNumber = _roundNumber + 1
-    _logger.info("RoundManager", "Round #" .. _roundNumber .. " starting with "
-        .. #players .. " player(s).")
+    _roundNumber  = _roundNumber + 1
+    _roundPlayers = players
 
-    _outfitSystem.Start()
-    _sabotageSystem.Start()
-    setState(RoundManager.State.DRESSING)
+    _d.logger.info("RoundManager",
+        "=== Round #" .. _roundNumber .. " START ==="
+        .. "  Players: " .. #players)
 
-    _logger.info("RoundManager", "Round #" .. _roundNumber
-        .. " in DRESSING phase. Players may now submit outfits.")
-    -- TODO Phase 1: schedule BeginVoting after a timer expires.
-end
-
---- Closes outfit submission and opens the VOTING phase.
---- @param players  Player[]  Voters and vote targets (typically the same list)
-function RoundManager.BeginVoting(players)
-    if _currentState ~= RoundManager.State.DRESSING then
-        _logger.warn("RoundManager", "BeginVoting called outside DRESSING state (current: "
-            .. _currentState .. ") – ignoring.")
-        return
-    end
-
-    _outfitSystem.Stop()
-    _votingSystem.Start()
-    _votingSystem.OpenVoting(players, players)
-    setState(RoundManager.State.VOTING)
-
-    _logger.info("RoundManager", "Round #" .. _roundNumber .. " in VOTING phase.")
-    -- TODO Phase 1: schedule EndRound after a timer expires.
-end
-
---- Tallies votes, transitions through RESULTS, resets all subsystems, returns to IDLE.
-function RoundManager.EndRound()
-    if _currentState == RoundManager.State.IDLE then
-        _logger.warn("RoundManager", "EndRound called with no active round – ignoring.")
-        return
-    end
-
-    local results = {}
-    if _currentState == RoundManager.State.VOTING then
-        _votingSystem.CloseVoting()
-        results = _votingSystem.TallyVotes()
-    end
-
-    setState(RoundManager.State.RESULTS)
-    _logger.info("RoundManager", "Round #" .. _roundNumber
-        .. " results ready. " .. #results .. " player(s) received votes.")
-
-    -- TODO Phase 1: fire RemoteEvent to broadcast results + update ReputationScore
-
-    -- Shut down subsystems
-    _votingSystem.Stop()
-    _sabotageSystem.Stop()
-
-    setState(RoundManager.State.IDLE)
-    _logger.info("RoundManager", "Round #" .. _roundNumber .. " complete.")
+    phaseLobby()
 end
 
 --- Returns the current state string (one of RoundManager.State).
@@ -164,7 +300,7 @@ function RoundManager.GetCurrentState()
     return _currentState
 end
 
---- Returns the number of rounds that have been started this session.
+--- Returns the count of rounds started this server session.
 --- @return number
 function RoundManager.GetRoundNumber()
     return _roundNumber
