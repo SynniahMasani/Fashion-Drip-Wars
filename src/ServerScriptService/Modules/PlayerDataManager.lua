@@ -17,7 +17,8 @@
             RoundsAnalyzed : number,
         },
         MaterialsInventory : table,         -- placeholder; populated in Phase 2
-        ReputationScore    : number,        -- default 0; updated after results
+        ReputationScore    : number,        -- 0-100 normalised; managed by ReputationSystem
+        MatchHistory       : table,         -- last 10 MatchSummary records (FIFO ring buffer)
         ActiveEffects      : table,         -- { [effectType: string]: effectData }
                                             -- e.g. TEMPORARY_STUN, PAINT_RANDOMIZER
     }
@@ -29,6 +30,7 @@
         PlayerDataManager.SetPlayerData(userId, key, value) -> boolean
         PlayerDataManager.RemovePlayerData(userId)
         PlayerDataManager.GetAllData()                      -> {[userId]: PlayerData}
+        -- ActiveEffects helpers (thin wrappers over PlayerData.ActiveEffects):
         PlayerDataManager.SetEffect(userId, effectType, effectData) -> boolean
         PlayerDataManager.GetEffect(userId, effectType)     -> any | nil
         PlayerDataManager.ClearEffect(userId, effectType)   -> boolean
@@ -59,6 +61,7 @@ local function newPlayerData(userId)
         },
         MaterialsInventory = {},
         ReputationScore    = 0,
+        MatchHistory       = {},
         ActiveEffects      = {},
     }
 end

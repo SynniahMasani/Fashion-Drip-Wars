@@ -48,6 +48,7 @@ local OutfitSystem      = loadModule("OutfitSystem")
 local VotingSystem      = loadModule("VotingSystem")
 local SabotageSystem    = loadModule("SabotageSystem")
 local RunwaySystem      = loadModule("RunwaySystem")
+local ReputationSystem  = loadModule("ReputationSystem")
 local RoundManager      = loadModule("RoundManager")
 
 -- ── Remotes ───────────────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ Logger.info("GameController", "========================================")
 PlayerDataManager.Init(Logger)
 ThemeSystem.Init(Logger)
 AIJudge.Init(Logger)
+ReputationSystem.Init(PlayerDataManager, Logger)
 StyleDNA.Init(PlayerDataManager, Logger)
 OutfitSystem.Init(PlayerDataManager, StyleDNA, Logger)
 VotingSystem.Init(PlayerDataManager, Logger)
@@ -77,6 +79,7 @@ RoundManager.Init({
     runwaySystem      = RunwaySystem,
     aiJudge           = AIJudge,
     styleDNA          = StyleDNA,
+    reputationSystem  = ReputationSystem,
     playerDataManager = PlayerDataManager,
     logger            = Logger,
     remotes           = Remotes,

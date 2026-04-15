@@ -32,6 +32,7 @@
         VotingSystem.OpenVoting(voters, targets)
         VotingSystem.SubmitVote(voter, targetUserId, starRating) -> (bool, string|nil)
         VotingSystem.TallyVotes()      -> VoteResult[]
+        VotingSystem.GetAllRawVotes()  -> { [targetUserId]: number[] }
         VotingSystem.CloseVoting()
         VotingSystem.IsVotingOpen()    -> boolean
 --]]
@@ -185,6 +186,20 @@ function VotingSystem.TallyVotes()
     _logger.info("VotingSystem",
         "Votes tallied. " .. #results .. " player(s) received votes.")
     return results
+end
+
+--- Returns a map of every target's individual star ratings for this session.
+--- Call this after CloseVoting() and before Stop() (Stop() clears _votes).
+--- Used by ReputationSystem to perform trimmed-mean and anti-abuse analysis.
+--- @return { [targetUserId: number]: number[] }
+function VotingSystem.GetAllRawVotes()
+    local result = {}
+    for _, vote in pairs(_votes) do
+        local tid = vote.targetUserId
+        if not result[tid] then result[tid] = {} end
+        table.insert(result[tid], vote.stars)
+    end
+    return result
 end
 
 --- Closes the current voting session (tallied data is preserved until Stop()).
