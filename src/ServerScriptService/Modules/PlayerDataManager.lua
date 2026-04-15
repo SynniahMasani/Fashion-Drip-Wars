@@ -11,8 +11,12 @@
     {
         UserId             : number,
         CurrentOutfit      : table | nil,   -- set by OutfitSystem each round
-        StyleDNA           : table,         -- placeholder; populated in Phase 1
-        MaterialsInventory : table,         -- placeholder; populated in Phase 1
+        StyleDNA           : {              -- managed by StyleDNA module
+            StyleScores    : { Streetwear, Luxury, Casual, Experimental },
+            DominantStyle  : string,        -- "None" until first analysis
+            RoundsAnalyzed : number,
+        },
+        MaterialsInventory : table,         -- placeholder; populated in Phase 2
         ReputationScore    : number,        -- default 0; updated after results
         ActiveEffects      : table,         -- { [effectType: string]: effectData }
                                             -- e.g. TEMPORARY_STUN, PAINT_RANDOMIZER
@@ -41,9 +45,18 @@ local _store  = {} -- [userId: number] -> PlayerData
 
 local function newPlayerData(userId)
     return {
-        UserId             = userId,
-        CurrentOutfit      = nil,
-        StyleDNA           = {},
+        UserId        = userId,
+        CurrentOutfit = nil,
+        StyleDNA      = {
+            StyleScores = {
+                Streetwear   = 0,
+                Luxury       = 0,
+                Casual       = 0,
+                Experimental = 0,
+            },
+            DominantStyle  = "None",
+            RoundsAnalyzed = 0,
+        },
         MaterialsInventory = {},
         ReputationScore    = 0,
         ActiveEffects      = {},
