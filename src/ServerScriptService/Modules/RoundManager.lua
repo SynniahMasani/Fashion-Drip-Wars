@@ -24,8 +24,8 @@
 
     Dependencies (injected via Init as a single deps table):
         outfitSystem, votingSystem, sabotageSystem,
-        themeSystem, runwaySystem, aiJudge,
-        logger, remotes
+        themeSystem, runwaySystem, aiJudge, styleDNA,
+        playerDataManager, logger, remotes
 
     Public API:
         RoundManager.Init(deps)
@@ -219,6 +219,12 @@ phaseResults = function()
             result.aiScore, result.playerVote, repDelta))
     end
 
+    -- Final Style DNA refresh: ensures DominantStyle reflects the full round,
+    -- even for players who never submitted an outfit this round (score = 0).
+    for _, player in ipairs(_roundPlayers) do
+        _d.styleDNA.RecalculateDominantStyle(player.UserId)
+    end
+
     -- Broadcast results to all clients
     _d.remotes.RoundResults:FireAllClients(finalResults)
     _d.logger.info("RoundManager", "Round #" .. _roundNumber .. " results broadcast.")
@@ -238,7 +244,7 @@ end
 --- Initialises the module with all dependencies.
 --- @param deps table {
 ---   outfitSystem, votingSystem, sabotageSystem,
----   themeSystem, runwaySystem, aiJudge,
+---   themeSystem, runwaySystem, aiJudge, styleDNA,
 ---   playerDataManager, logger, remotes
 --- }
 function RoundManager.Init(deps)

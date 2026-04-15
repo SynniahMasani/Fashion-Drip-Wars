@@ -9,11 +9,12 @@
           └─ PlayerDataManager(Logger)
                ├─ ThemeSystem(Logger)
                ├─ AIJudge(Logger)
-               ├─ OutfitSystem(PlayerDataManager, Logger)
+               ├─ StyleDNA(PlayerDataManager, Logger)
+               ├─ OutfitSystem(PlayerDataManager, StyleDNA, Logger)
                ├─ VotingSystem(PlayerDataManager, Logger)
                ├─ SabotageSystem(PlayerDataManager, Logger, Remotes, Players)
                ├─ RunwaySystem(Logger, Remotes)
-               └─ RoundManager({all above, Remotes})
+               └─ RoundManager({all above + StyleDNA, Remotes})
 
     Server-authoritative rules enforced here:
         • SubmitOutfit  – phase check + stun check before forwarding
@@ -42,6 +43,7 @@ local Logger            = loadModule("Logger")
 local PlayerDataManager = loadModule("PlayerDataManager")
 local ThemeSystem       = loadModule("ThemeSystem")
 local AIJudge           = loadModule("AIJudge")
+local StyleDNA          = loadModule("StyleDNA")
 local OutfitSystem      = loadModule("OutfitSystem")
 local VotingSystem      = loadModule("VotingSystem")
 local SabotageSystem    = loadModule("SabotageSystem")
@@ -61,7 +63,8 @@ Logger.info("GameController", "========================================")
 PlayerDataManager.Init(Logger)
 ThemeSystem.Init(Logger)
 AIJudge.Init(Logger)
-OutfitSystem.Init(PlayerDataManager, Logger)
+StyleDNA.Init(PlayerDataManager, Logger)
+OutfitSystem.Init(PlayerDataManager, StyleDNA, Logger)
 VotingSystem.Init(PlayerDataManager, Logger)
 SabotageSystem.Init(PlayerDataManager, Logger, Remotes, Players)
 RunwaySystem.Init(Logger, Remotes)
@@ -73,6 +76,7 @@ RoundManager.Init({
     themeSystem       = ThemeSystem,
     runwaySystem      = RunwaySystem,
     aiJudge           = AIJudge,
+    styleDNA          = StyleDNA,
     playerDataManager = PlayerDataManager,
     logger            = Logger,
     remotes           = Remotes,

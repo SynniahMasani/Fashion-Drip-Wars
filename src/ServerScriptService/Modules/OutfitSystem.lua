@@ -23,10 +23,10 @@
     }
 
     Dependencies (injected via Init):
-        PlayerDataManager, Logger
+        PlayerDataManager, StyleDNA, Logger
 
     Public API:
-        OutfitSystem.Init(playerDataManager, logger)
+        OutfitSystem.Init(playerDataManager, styleDNA, logger)
         OutfitSystem.Start()
         OutfitSystem.Stop()
         OutfitSystem.ValidateAndSetOutfit(player, outfitData) -> (bool, string|nil)
@@ -39,6 +39,7 @@ local OutfitSystem = {}
 -- ── Private state ────────────────────────────────────────────────────────────
 
 local _playerDataManager = nil
+local _styleDNA          = nil
 local _logger            = nil
 local _isRunning         = false
 
@@ -95,9 +96,11 @@ end
 
 --- Initialises the module.
 --- @param playerDataManager  table
+--- @param styleDNA           table  StyleDNA module reference
 --- @param logger             table
-function OutfitSystem.Init(playerDataManager, logger)
+function OutfitSystem.Init(playerDataManager, styleDNA, logger)
     _playerDataManager = playerDataManager
+    _styleDNA          = styleDNA
     _logger            = logger
     _logger.info("OutfitSystem", "Initialized.")
 end
@@ -140,6 +143,10 @@ function OutfitSystem.ValidateAndSetOutfit(player, outfitData)
             "Failed to persist outfit for " .. player.Name .. " – PlayerData not found.")
         return false, "PlayerData record not found."
     end
+
+    -- Analyse the final (post-sabotage) outfit and update the player's Style DNA.
+    -- Called after applyPaintRandomizer so DNA reflects server-authoritative colours.
+    _styleDNA.UpdateStyleDNA(player, outfitData)
 
     _logger.info("OutfitSystem", "Outfit accepted for " .. player.Name)
     return true, nil
