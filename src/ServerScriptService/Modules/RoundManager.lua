@@ -24,7 +24,7 @@
 
     Dependencies (injected via Init as a single deps table):
         outfitSystem, votingSystem, sabotageSystem,
-        themeSystem, runwaySystem, aiJudge, styleDNA,
+        themeSystem, runwaySystem, aiJudge, styleDNA, reputationSystem,
         playerDataManager, logger, remotes
 
     Public API:
@@ -202,21 +202,44 @@ phaseResults = function()
         return a.finalScore > b.finalScore
     end)
 
-    -- Assign ranks and update reputation
+    -- Build a UserId → Player lookup so we can pass Player objects to subsystems
+    local playerById = {}
+    for _, player in ipairs(_roundPlayers) do
+        playerById[player.UserId] = player
+    end
+
+    -- Pull individual star-rating arrays before VotingSystem.Stop() clears them.
+    -- Shape: { [targetUserId: number]: number[] }
+    local rawVoteMap = _d.votingSystem.GetAllRawVotes()
+
+    -- Assign ranks, update Reputation, include rep score in broadcast payload
     for rank, result in ipairs(finalResults) do
         result.rank = rank
 
-        -- Reputation delta: +10 for 1st, +6 for 2nd, +3 for 3rd, +1 otherwise
-        local repDelta = ({ 10, 6, 3 })[rank] or 1
-        local data = _d.playerDataManager.GetPlayerData(result.userId)
-        if data then
-            data.ReputationScore = data.ReputationScore + repDelta
+        local player = playerById[result.userId]
+        if player then
+            local roundResult = {
+                userId       = result.userId,
+                rank         = rank,
+                totalPlayers = #_roundPlayers,
+                finalScore   = result.finalScore,
+                playerVote   = result.playerVote,
+                aiScore      = result.aiScore,
+                rawVotes     = rawVoteMap[result.userId] or {},
+                roundNumber  = _roundNumber,
+            }
+            _d.reputationSystem.UpdateReputation(player, roundResult)
+
+            local repProfile = _d.reputationSystem.GetReputation(player)
+            result.reputation = repProfile and repProfile.score or 0
+            result.repTier    = repProfile and repProfile.tier  or "Newcomer"
         end
 
         _d.logger.info("RoundManager", string.format(
-            "  #%d %-20s  Final: %.1f  (AI: %.1f | Vote: %.1f | Rep +%d)",
+            "  #%d %-20s  Final: %.1f  (AI: %.1f | Vote: %.1f | Rep: %.1f [%s])",
             rank, result.name, result.finalScore,
-            result.aiScore, result.playerVote, repDelta))
+            result.aiScore, result.playerVote,
+            result.reputation or 0, result.repTier or "?"))
     end
 
     -- Final Style DNA refresh: ensures DominantStyle reflects the full round,
@@ -244,7 +267,7 @@ end
 --- Initialises the module with all dependencies.
 --- @param deps table {
 ---   outfitSystem, votingSystem, sabotageSystem,
----   themeSystem, runwaySystem, aiJudge, styleDNA,
+---   themeSystem, runwaySystem, aiJudge, styleDNA, reputationSystem,
 ---   playerDataManager, logger, remotes
 --- }
 function RoundManager.Init(deps)
