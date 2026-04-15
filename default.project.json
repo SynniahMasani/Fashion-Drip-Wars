@@ -1,0 +1,30 @@
+{
+    "name": "FashionDripWars",
+    "tree": {
+        "$className": "DataModel",
+
+        "ServerScriptService": {
+            "$className": "ServerScriptService",
+            "$path": "src/ServerScriptService"
+        },
+
+        "ReplicatedStorage": {
+            "$className": "ReplicatedStorage",
+            "Remotes": {
+                "$className": "Folder",
+                "StartRound": {
+                    "$className": "RemoteEvent"
+                },
+                "SubmitOutfit": {
+                    "$className": "RemoteEvent"
+                },
+                "SubmitVote": {
+                    "$className": "RemoteEvent"
+                },
+                "UseSabotage": {
+                    "$className": "RemoteEvent"
+                }
+            }
+        }
+    }
+}
