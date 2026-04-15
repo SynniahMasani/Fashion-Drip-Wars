@@ -1,125 +1,163 @@
 --[[
     GameController  (Server Script – single entry point)
     ─────────────────────────────────────────────────────
-    Boots the game server by:
-        1. Loading all modules in dependency order
-        2. Calling Init() on each (dependency injection)
-        3. Wiring player join/leave events
-        4. Wiring RemoteEvent handlers (server-authoritative validation)
-        5. Starting the RoundManager
+    Boots the server by initialising all systems in dependency order,
+    wiring RemoteEvent handlers, and starting the RoundManager.
 
     Dependency graph (no cycles):
         Logger
           └─ PlayerDataManager(Logger)
+               ├─ ThemeSystem(Logger)
+               ├─ AIJudge(Logger)
                ├─ OutfitSystem(PlayerDataManager, Logger)
                ├─ VotingSystem(PlayerDataManager, Logger)
-               └─ SabotageSystem(PlayerDataManager, Logger)
-                    └─ RoundManager(Outfit, Voting, Sabotage, Logger)
+               ├─ SabotageSystem(PlayerDataManager, Logger, Remotes, Players)
+               ├─ RunwaySystem(Logger, Remotes)
+               └─ RoundManager({all above, Remotes})
+
+    Server-authoritative rules enforced here:
+        • SubmitOutfit  – phase check + stun check before forwarding
+        • SubmitVote    – phase check before forwarding
+        • UseSabotage   – phase check before forwarding
+        • StartRound    – only valid from IDLE (RoundManager guards internally)
 --]]
 
--- ── Services ─────────────────────────────────────────────────────────────────
+-- ── Roblox Services ───────────────────────────────────────────────────────────
 
 local Players             = game:GetService("Players")
 local ReplicatedStorage   = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
--- ── Module references ─────────────────────────────────────────────────────────
+-- ── Module loader ─────────────────────────────────────────────────────────────
 
 local Modules = ServerScriptService:WaitForChild("Modules")
 
-local Logger             = require(Modules:WaitForChild("Logger"))
-local PlayerDataManager  = require(Modules:WaitForChild("PlayerDataManager"))
-local OutfitSystem       = require(Modules:WaitForChild("OutfitSystem"))
-local VotingSystem       = require(Modules:WaitForChild("VotingSystem"))
-local SabotageSystem     = require(Modules:WaitForChild("SabotageSystem"))
-local RoundManager       = require(Modules:WaitForChild("RoundManager"))
+local function loadModule(name)
+    return require(Modules:WaitForChild(name))
+end
 
--- ── Initialisation (dependency-first order) ───────────────────────────────────
+-- ── Load all modules ──────────────────────────────────────────────────────────
+
+local Logger            = loadModule("Logger")
+local PlayerDataManager = loadModule("PlayerDataManager")
+local ThemeSystem       = loadModule("ThemeSystem")
+local AIJudge           = loadModule("AIJudge")
+local OutfitSystem      = loadModule("OutfitSystem")
+local VotingSystem      = loadModule("VotingSystem")
+local SabotageSystem    = loadModule("SabotageSystem")
+local RunwaySystem      = loadModule("RunwaySystem")
+local RoundManager      = loadModule("RoundManager")
+
+-- ── Remotes ───────────────────────────────────────────────────────────────────
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+
+-- ── Initialise systems (dependency-first order) ───────────────────────────────
 
 Logger.info("GameController", "========================================")
 Logger.info("GameController", "   Fashion Drip Wars – Server Boot")
 Logger.info("GameController", "========================================")
 
 PlayerDataManager.Init(Logger)
+ThemeSystem.Init(Logger)
+AIJudge.Init(Logger)
 OutfitSystem.Init(PlayerDataManager, Logger)
 VotingSystem.Init(PlayerDataManager, Logger)
-SabotageSystem.Init(PlayerDataManager, Logger)
-RoundManager.Init(OutfitSystem, VotingSystem, SabotageSystem, Logger)
+SabotageSystem.Init(PlayerDataManager, Logger, Remotes, Players)
+RunwaySystem.Init(Logger, Remotes)
+
+RoundManager.Init({
+    outfitSystem      = OutfitSystem,
+    votingSystem      = VotingSystem,
+    sabotageSystem    = SabotageSystem,
+    themeSystem       = ThemeSystem,
+    runwaySystem      = RunwaySystem,
+    aiJudge           = AIJudge,
+    playerDataManager = PlayerDataManager,
+    logger            = Logger,
+    remotes           = Remotes,
+})
 
 Logger.info("GameController", "All systems initialized.")
 
--- ── RemoteEvent wiring ────────────────────────────────────────────────────────
+-- ── Remote: StartRound ────────────────────────────────────────────────────────
+-- Client fires this to request a round start (admin gating added in Phase 2).
 
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-
---[[
-    StartRound
-    Client → Server: player requests a round to start.
-    Phase 0: any player can trigger (admin gating added in Phase 1).
---]]
 Remotes.StartRound.OnServerEvent:Connect(function(player)
     Logger.info("GameController", player.Name .. " requested StartRound.")
-    -- TODO Phase 1: gate on admin role / game-state prerequisites
+    -- TODO Phase 2: verify player is admin or game-mode allows player-initiated rounds
     RoundManager.StartRound(Players:GetPlayers())
 end)
 
---[[
-    SubmitOutfit
-    Client → Server: player submits their outfit for the current round.
-    Accepted only during the DRESSING phase; all validation server-side.
---]]
+-- ── Remote: SubmitOutfit ──────────────────────────────────────────────────────
+-- Client fires with { HeadId, TopId, BottomId, ShoesId, AccessoryIds,
+--                     ColorPrimary, ColorSecondary, StyleTags }.
+
 Remotes.SubmitOutfit.OnServerEvent:Connect(function(player, outfitData)
+    -- Phase gate
     if RoundManager.GetCurrentState() ~= RoundManager.State.DRESSING then
-        Logger.warn("GameController", player.Name
-            .. " submitted outfit outside DRESSING phase – rejected.")
+        Logger.warn("GameController",
+            player.Name .. " submitted outfit outside DRESSING phase – rejected.")
         return
     end
 
-    local success, err = OutfitSystem.ValidateAndSetOutfit(player, outfitData)
-    if not success then
-        Logger.warn("GameController", "Outfit rejected for " .. player.Name
-            .. ": " .. tostring(err))
-        -- TODO Phase 1: fire a RemoteFunction / error event back to client
+    -- Stun check: read from PlayerData.ActiveEffects (written by SabotageSystem)
+    local stunEffect = PlayerDataManager.GetEffect(player.UserId, "TEMPORARY_STUN")
+    if stunEffect then
+        if os.clock() < stunEffect.expiresAt then
+            Logger.warn("GameController",
+                player.Name .. " is stunned – outfit submission blocked.")
+            return
+        else
+            -- Stun expired naturally; clean it up
+            PlayerDataManager.ClearEffect(player.UserId, "TEMPORARY_STUN")
+        end
+    end
+
+    local ok, err = OutfitSystem.ValidateAndSetOutfit(player, outfitData)
+    if not ok then
+        Logger.warn("GameController",
+            "Outfit rejected for " .. player.Name .. ": " .. tostring(err))
+        -- TODO Phase 2: fire an error RemoteEvent back to the client
     end
 end)
 
---[[
-    SubmitVote
-    Client → Server: player votes for a target during VOTING phase.
-    VotingSystem enforces eligibility, one-vote limit, and no self-voting.
---]]
-Remotes.SubmitVote.OnServerEvent:Connect(function(voter, targetUserId)
+-- ── Remote: SubmitVote ────────────────────────────────────────────────────────
+-- Client fires with (targetUserId: number, starRating: number 1-5).
+
+Remotes.SubmitVote.OnServerEvent:Connect(function(voter, targetUserId, starRating)
+    -- Phase gate
     if RoundManager.GetCurrentState() ~= RoundManager.State.VOTING then
-        Logger.warn("GameController", voter.Name
-            .. " submitted vote outside VOTING phase – rejected.")
+        Logger.warn("GameController",
+            voter.Name .. " submitted vote outside VOTING phase – rejected.")
         return
     end
 
-    local success, err = VotingSystem.SubmitVote(voter, targetUserId)
-    if not success then
-        Logger.warn("GameController", "Vote rejected for " .. voter.Name
-            .. ": " .. tostring(err))
-        -- TODO Phase 1: fire error event back to client
+    local ok, err = VotingSystem.SubmitVote(voter, targetUserId, starRating)
+    if not ok then
+        Logger.warn("GameController",
+            "Vote rejected for " .. voter.Name .. ": " .. tostring(err))
+        -- TODO Phase 2: fire error event back to client
     end
 end)
 
---[[
-    UseSabotage
-    Client → Server: player requests a sabotage action during DRESSING phase.
-    SabotageSystem validates type, cooldown, and target existence.
---]]
+-- ── Remote: UseSabotage ───────────────────────────────────────────────────────
+-- Client fires with (sabotageType: string, targetUserId: number).
+-- Only allowed during DRESSING phase.
+
 Remotes.UseSabotage.OnServerEvent:Connect(function(player, sabotageType, targetUserId)
+    -- Phase gate
     if RoundManager.GetCurrentState() ~= RoundManager.State.DRESSING then
-        Logger.warn("GameController", player.Name
-            .. " attempted sabotage outside DRESSING phase – rejected.")
+        Logger.warn("GameController",
+            player.Name .. " attempted sabotage outside DRESSING phase – rejected.")
         return
     end
 
-    local success, err = SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
-    if not success then
-        Logger.warn("GameController", "Sabotage rejected for " .. player.Name
-            .. ": " .. tostring(err))
-        -- TODO Phase 1: fire error event back to client
+    local ok, err = SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
+    if not ok then
+        Logger.warn("GameController",
+            "Sabotage rejected for " .. player.Name .. ": " .. tostring(err))
+        -- TODO Phase 2: fire error event back to client
     end
 end)
 
@@ -137,7 +175,7 @@ Players.PlayerRemoving:Connect(function(player)
     PlayerDataManager.RemovePlayerData(player.UserId)
 end)
 
--- Catch any players who joined before this script finished loading
+-- Catch players who joined before this script finished loading
 for _, player in ipairs(Players:GetPlayers()) do
     PlayerDataManager.CreatePlayerData(player)
 end

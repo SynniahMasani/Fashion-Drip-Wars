@@ -12,18 +12,17 @@
             "$className": "ReplicatedStorage",
             "Remotes": {
                 "$className": "Folder",
-                "StartRound": {
-                    "$className": "RemoteEvent"
-                },
-                "SubmitOutfit": {
-                    "$className": "RemoteEvent"
-                },
-                "SubmitVote": {
-                    "$className": "RemoteEvent"
-                },
-                "UseSabotage": {
-                    "$className": "RemoteEvent"
-                }
+
+                "StartRound":   { "$className": "RemoteEvent" },
+                "SubmitOutfit": { "$className": "RemoteEvent" },
+                "SubmitVote":   { "$className": "RemoteEvent" },
+                "UseSabotage":  { "$className": "RemoteEvent" },
+
+                "PhaseChanged":      { "$className": "RemoteEvent" },
+                "ThemeSelected":     { "$className": "RemoteEvent" },
+                "RunwayTurnStarted": { "$className": "RemoteEvent" },
+                "RoundResults":      { "$className": "RemoteEvent" },
+                "SabotageApplied":   { "$className": "RemoteEvent" }
             }
         }
     }
