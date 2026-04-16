@@ -8,10 +8,11 @@
         Logger
           └─ PlayerDataManager(Logger)
                ├─ ThemeSystem(Logger)
+               ├─ MetaSystem(Logger)
                ├─ MaterialSystem(PlayerDataManager, Logger)
                ├─ ReputationSystem(PlayerDataManager, Logger)
                ├─ StyleDNA(PlayerDataManager, Logger)
-               │    └─ JudgeSystem(StyleDNA, MaterialSystem, ThemeSystem, Logger)
+               │    └─ JudgeSystem(StyleDNA, MaterialSystem, ThemeSystem, MetaSystem, Logger)
                ├─ OutfitSystem(PlayerDataManager, StyleDNA, MaterialSystem, Logger)
                ├─ VotingSystem(PlayerDataManager, Logger)
                ├─ SabotageSystem(PlayerDataManager, Logger, Remotes, Players)
@@ -44,6 +45,7 @@ end
 local Logger            = loadModule("Logger")
 local PlayerDataManager = loadModule("PlayerDataManager")
 local ThemeSystem       = loadModule("ThemeSystem")
+local MetaSystem        = loadModule("MetaSystem")
 local JudgeSystem       = loadModule("JudgeSystem")
 local StyleDNA          = loadModule("StyleDNA")
 local OutfitSystem      = loadModule("OutfitSystem")
@@ -66,10 +68,11 @@ Logger.info("GameController", "========================================")
 
 PlayerDataManager.Init(Logger)
 ThemeSystem.Init(Logger)
+MetaSystem.Init(Logger)
 MaterialSystem.Init(PlayerDataManager, Logger)
 ReputationSystem.Init(PlayerDataManager, Logger)
 StyleDNA.Init(PlayerDataManager, Logger)
-JudgeSystem.Init(StyleDNA, MaterialSystem, ThemeSystem, Logger)
+JudgeSystem.Init(StyleDNA, MaterialSystem, ThemeSystem, MetaSystem, Logger)
 OutfitSystem.Init(PlayerDataManager, StyleDNA, MaterialSystem, Logger)
 VotingSystem.Init(PlayerDataManager, Logger)
 SabotageSystem.Init(PlayerDataManager, Logger, Remotes, Players)
@@ -82,6 +85,7 @@ RoundManager.Init({
     themeSystem       = ThemeSystem,
     runwaySystem      = RunwaySystem,
     judgeSystem       = JudgeSystem,
+    metaSystem        = MetaSystem,
     styleDNA          = StyleDNA,
     reputationSystem  = ReputationSystem,
     playerDataManager = PlayerDataManager,

@@ -44,7 +44,7 @@
     be adjusted per-season for "meta shifts" (e.g., a luxury-heavy season).
 
     Dependencies (injected via Init):
-        StyleDNA, MaterialSystem, ThemeSystem, Logger
+        StyleDNA, MaterialSystem, ThemeSystem, MetaSystem, Logger
 
     JudgeDef:
     {
@@ -58,7 +58,7 @@
     }
 
     Public API:
-        JudgeSystem.Init(styleDNA, materialSystem, themeSystem, logger)
+        JudgeSystem.Init(styleDNA, materialSystem, themeSystem, metaSystem, logger)
         JudgeSystem.SelectJudgesForRound()           -> JudgeDef[]
         JudgeSystem.GetJudgesForRound()              -> JudgeDef[]
         JudgeSystem.ScoreOutfit(player, outfitData)  -> number  (1.0 – 10.0)
@@ -161,6 +161,7 @@ local MAX_JUDGES  = 3
 local _styleDNA       = nil
 local _materialSystem = nil
 local _themeSystem    = nil
+local _metaSystem     = nil
 local _logger         = nil
 local _panelForRound  = {}   -- JudgeDef[] selected at the top of each round
 
@@ -231,11 +232,13 @@ end
 --- @param styleDNA       table  StyleDNA module reference
 --- @param materialSystem table  MaterialSystem module reference
 --- @param themeSystem    table  ThemeSystem module reference
+--- @param metaSystem     table  MetaSystem module reference
 --- @param logger         table
-function JudgeSystem.Init(styleDNA, materialSystem, themeSystem, logger)
+function JudgeSystem.Init(styleDNA, materialSystem, themeSystem, metaSystem, logger)
     _styleDNA       = styleDNA
     _materialSystem = materialSystem
     _themeSystem    = themeSystem
+    _metaSystem     = metaSystem
     _logger         = logger
     _logger.info("JudgeSystem",
         "Initialized with " .. #JUDGES .. " judges in the catalogue.")
@@ -346,12 +349,26 @@ function JudgeSystem.ScoreOutfit(player, outfitData)
             matBonus, table.concat(outfitData.Materials, ", ")))
     end
 
-    local finalScore = math.max(1.0, math.min(10.0, panelAvg + matBonus))
+    -- ── Meta shift modifier ───────────────────────────────────────────────────
+    -- Penalises overused styles and rewards underused ones based on server-wide
+    -- usage history.  Only applied when the player has a clear dominant style
+    -- (Mixed/None receive no modifier — their impact is already balanced).
+    local dominantStyle = styleProfile and styleProfile.DominantStyle or "None"
+    local metaMod       = _metaSystem.GetStyleModifier(dominantStyle)
+    if metaMod ~= 0 then
+        local metaStatus = metaMod < 0 and "Overused" or "Underused"
+        _logger.info("JudgeSystem", string.format(
+            "  Meta: %+.2f  [%s → %s]",
+            metaMod, dominantStyle, metaStatus))
+    end
+    -- ─────────────────────────────────────────────────────────────────────────
+
+    local finalScore = math.max(1.0, math.min(10.0, panelAvg + matBonus + metaMod))
     finalScore = math.floor(finalScore * 10 + 0.5) / 10
 
     _logger.info("JudgeSystem", string.format(
-        "%s  panel avg: %.1f  mat: +%.2f  →  AI score: %.1f",
-        player.Name, panelAvg, matBonus, finalScore))
+        "%s  panel avg: %.1f  mat: %+.2f  meta: %+.2f  →  AI score: %.1f",
+        player.Name, panelAvg, matBonus, metaMod, finalScore))
 
     return finalScore
 end

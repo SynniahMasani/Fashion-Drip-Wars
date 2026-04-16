@@ -24,8 +24,8 @@
 
     Dependencies (injected via Init as a single deps table):
         outfitSystem, votingSystem, sabotageSystem,
-        themeSystem, runwaySystem, judgeSystem, styleDNA, reputationSystem,
-        playerDataManager, logger, remotes
+        themeSystem, runwaySystem, judgeSystem, metaSystem, styleDNA,
+        reputationSystem, playerDataManager, logger, remotes
 
     Public API:
         RoundManager.Init(deps)
@@ -179,6 +179,13 @@ phaseResults = function()
         avgByPlayer[entry.userId] = entry.average
     end
 
+    -- Record this round's outfit styles in the meta buffer (before scoring so
+    -- GetStyleModifier reads only historical data, not this round's submissions)
+    for _, p in ipairs(_roundPlayers) do
+        local o = _d.outfitSystem.GetPlayerOutfit(p.UserId)
+        if o then _d.metaSystem.UpdateGlobalStyleData(o) end
+    end
+
     -- Combine player votes with JudgeSystem panel scores (AI = 40% of final)
     local finalResults = {}
     for _, player in ipairs(_roundPlayers) do
@@ -254,6 +261,11 @@ phaseResults = function()
     _d.remotes.RoundResults:FireAllClients(finalResults)
     _d.logger.info("RoundManager", "Round #" .. _roundNumber .. " results broadcast.")
 
+    -- Finalize meta: decay history and merge this round's buffer.
+    -- Must run after all ScoreOutfit calls so the buffer doesn't influence
+    -- the scores it just produced.
+    _d.metaSystem.FinalizeRound()
+
     -- Clean up subsystems
     _d.votingSystem.Stop()
     _d.sabotageSystem.Stop()
@@ -269,8 +281,8 @@ end
 --- Initialises the module with all dependencies.
 --- @param deps table {
 ---   outfitSystem, votingSystem, sabotageSystem,
----   themeSystem, runwaySystem, judgeSystem, styleDNA, reputationSystem,
----   playerDataManager, logger, remotes
+---   themeSystem, runwaySystem, judgeSystem, metaSystem, styleDNA,
+---   reputationSystem, playerDataManager, logger, remotes
 --- }
 function RoundManager.Init(deps)
     _d = deps
