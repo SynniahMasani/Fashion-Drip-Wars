@@ -20,13 +20,14 @@
         ColorPrimary   : { r, g, b },       -- 0..1 components
         ColorSecondary : { r, g, b },
         StyleTags      : string[],          -- e.g. {"Casual", "Streetwear"}
+        Materials      : string[],          -- up to 3 material names; player must own each
     }
 
     Dependencies (injected via Init):
-        PlayerDataManager, StyleDNA, Logger
+        PlayerDataManager, StyleDNA, MaterialSystem, Logger
 
     Public API:
-        OutfitSystem.Init(playerDataManager, styleDNA, logger)
+        OutfitSystem.Init(playerDataManager, styleDNA, materialSystem, logger)
         OutfitSystem.Start()
         OutfitSystem.Stop()
         OutfitSystem.ValidateAndSetOutfit(player, outfitData) -> (bool, string|nil)
@@ -40,6 +41,7 @@ local OutfitSystem = {}
 
 local _playerDataManager = nil
 local _styleDNA          = nil
+local _materialSystem    = nil
 local _logger            = nil
 local _isRunning         = false
 
@@ -67,6 +69,11 @@ local function validateOutfit(outfitData)
     -- StyleTags must be a table if provided
     if outfitData.StyleTags ~= nil and type(outfitData.StyleTags) ~= "table" then
         return false, "StyleTags must be a table."
+    end
+
+    -- Materials must be a table if provided (ownership checked separately)
+    if outfitData.Materials ~= nil and type(outfitData.Materials) ~= "table" then
+        return false, "Materials must be a table."
     end
 
     -- TODO Phase 1: verify HeadId / TopId / BottomId / ShoesId are valid catalogue IDs
@@ -97,10 +104,12 @@ end
 --- Initialises the module.
 --- @param playerDataManager  table
 --- @param styleDNA           table  StyleDNA module reference
+--- @param materialSystem     table  MaterialSystem module reference
 --- @param logger             table
-function OutfitSystem.Init(playerDataManager, styleDNA, logger)
+function OutfitSystem.Init(playerDataManager, styleDNA, materialSystem, logger)
     _playerDataManager = playerDataManager
     _styleDNA          = styleDNA
+    _materialSystem    = materialSystem
     _logger            = logger
     _logger.info("OutfitSystem", "Initialized.")
 end
@@ -134,6 +143,15 @@ function OutfitSystem.ValidateAndSetOutfit(player, outfitData)
         return false, err
     end
 
+    -- Validate material ownership and list constraints (no inventory changes yet)
+    local matsOk, matsErr =
+        _materialSystem.ValidateOutfitMaterials(player, outfitData.Materials)
+    if not matsOk then
+        _logger.warn("OutfitSystem",
+            "Material validation failed for " .. player.Name .. ": " .. matsErr)
+        return false, matsErr
+    end
+
     -- Server enforces active sabotage effects before storing the outfit
     applyPaintRandomizer(player.UserId, outfitData)
 
@@ -143,6 +161,9 @@ function OutfitSystem.ValidateAndSetOutfit(player, outfitData)
             "Failed to persist outfit for " .. player.Name .. " – PlayerData not found.")
         return false, "PlayerData record not found."
     end
+
+    -- Consume materials now that the outfit is persisted (no waste on data errors)
+    _materialSystem.ConsumeOutfitMaterials(player, outfitData.Materials)
 
     -- Analyse the final (post-sabotage) outfit and update the player's Style DNA.
     -- Called after applyPaintRandomizer so DNA reflects server-authoritative colours.

@@ -12,10 +12,10 @@
     cleanly in RoundManager.
 
     Dependencies (injected via Init):
-        Logger
+        MaterialSystem, Logger
 
     Public API:
-        AIJudge.Init(logger)
+        AIJudge.Init(materialSystem, logger)
         AIJudge.ScoreOutfit(outfitData, theme) -> number
 --]]
 
@@ -29,7 +29,8 @@ local EMPTY_SCORE = 1.5 -- score when no outfit was submitted
 
 -- ── Private state ────────────────────────────────────────────────────────────
 
-local _logger = nil
+local _materialSystem = nil
+local _logger         = nil
 
 -- ── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -57,9 +58,11 @@ end
 -- ── Public API ───────────────────────────────────────────────────────────────
 
 --- Initialises the module.
---- @param logger  table
-function AIJudge.Init(logger)
-    _logger = logger
+--- @param materialSystem  table  MaterialSystem module reference
+--- @param logger          table
+function AIJudge.Init(materialSystem, logger)
+    _materialSystem = materialSystem
+    _logger         = logger
     _logger.info("AIJudge", "Initialized.")
 end
 
@@ -98,6 +101,18 @@ function AIJudge.ScoreOutfit(outfitData, theme)
 
     -- [5] Rarity bonus: +0.2 if any item is a limited-edition catalogue entry
     -- (requires catalogue metadata lookup – implement in Phase 1)
+    -- ────────────────────────────────────────────────────────────────────────
+
+    -- ── Material bonus ───────────────────────────────────────────────────────
+    -- Materials were validated and consumed at submission time; here we just
+    -- look up the bonus by name – no inventory access needed.
+    local matBonus = _materialSystem.ComputeTotalBonus(outfitData.Materials, theme)
+    if matBonus > 0 then
+        score = score + matBonus
+        _logger.info("AIJudge", string.format(
+            "Material bonus: +%.2f from [%s]",
+            matBonus, table.concat(outfitData.Materials, ", ")))
+    end
     -- ────────────────────────────────────────────────────────────────────────
 
     -- Clamp to [1.0, 10.0] and round to one decimal
