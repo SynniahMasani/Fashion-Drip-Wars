@@ -14,7 +14,7 @@
 
     Public API:
         RunwaySystem.Init(logger, remotes)
-        RunwaySystem.StartRunway(players, onComplete)
+        RunwaySystem.StartRunway(players, onTurnStarted, onComplete)
         RunwaySystem.SkipCurrent()
         RunwaySystem.Stop()
         RunwaySystem.GetCurrentUserId() -> number | nil
@@ -67,10 +67,11 @@ end
 
 --- Begins the runway sequence for a list of players.
 --- Fires RunwayTurnStarted(userId, turnIndex, totalPlayers) for each turn.
---- Calls onComplete() when every player has walked (or been skipped).
---- @param players    Player[]
---- @param onComplete function  Called with no arguments when the runway ends
-function RunwaySystem.StartRunway(players, onComplete)
+--- @param players       Player[]
+--- @param onTurnStarted function | nil  Called with (player) at the start of each turn.
+---                                      Use for server-side per-turn reactions (e.g. AudienceSystem).
+--- @param onComplete    function | nil  Called with no arguments when the runway ends.
+function RunwaySystem.StartRunway(players, onTurnStarted, onComplete)
     cancelTurnTimer()
 
     -- Build and shuffle the queue
@@ -119,6 +120,11 @@ function RunwaySystem.StartRunway(players, onComplete)
             _currentIndex,
             #_queue
         )
+
+        -- Notify server-side listeners (e.g. AudienceSystem) for this turn
+        if onTurnStarted then
+            onTurnStarted(currentPlayer)
+        end
 
         -- Schedule next turn
         _turnThread = task.delay(TURN_DURATION, _advanceTurn)

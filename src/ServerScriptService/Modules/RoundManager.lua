@@ -24,8 +24,8 @@
 
     Dependencies (injected via Init as a single deps table):
         outfitSystem, votingSystem, sabotageSystem,
-        themeSystem, runwaySystem, judgeSystem, metaSystem, styleDNA,
-        reputationSystem, playerDataManager, logger, remotes
+        themeSystem, runwaySystem, judgeSystem, metaSystem, audienceSystem,
+        styleDNA, reputationSystem, playerDataManager, logger, remotes
 
     Public API:
         RoundManager.Init(deps)
@@ -78,6 +78,24 @@ local function cancelPhaseTimer()
         task.cancel(_phaseThread)
         _phaseThread = nil
     end
+end
+
+--- Lightweight outfit score (0–10) for real-time audience updates during runway.
+--- Considers slot fill, accessory count, and material count only — no StyleDNA
+--- or judge bias — so it is fast and doesn't duplicate phaseResults scoring.
+--- Slots (max 4) → up to 5 pts | Accessories (max 5) → up to 3 pts | Materials (max 3) → up to 2 pts
+local function quickOutfitScore(outfit)
+    if not outfit then return 0 end
+    local slots = 0
+    for _, slot in ipairs({ "HeadId", "TopId", "BottomId", "ShoesId" }) do
+        if outfit[slot] then slots = slots + 1 end
+    end
+    local accs = (type(outfit.AccessoryIds) == "table") and #outfit.AccessoryIds or 0
+    local mats = (type(outfit.Materials)    == "table") and #outfit.Materials    or 0
+    return math.min(10,
+        slots * 1.25
+        + math.min(accs, 5) * 0.60
+        + math.min(mats, 3) * 0.67)
 end
 
 --- Transitions to a new state and broadcasts to all clients.
@@ -145,12 +163,21 @@ end
 
 phaseRunway = function()
     setState(RoundManager.State.RUNWAY, 0)  -- duration is player-count dependent
+    _d.audienceSystem.StartRunway()
     _d.logger.info("RoundManager", "Runway phase starting.")
 
-    -- RunwaySystem drives timing internally; calls the callback when done
-    _d.runwaySystem.StartRunway(_roundPlayers, function()
-        phaseVoting()
-    end)
+    -- RunwaySystem drives timing internally; calls the callbacks per turn and on completion
+    _d.runwaySystem.StartRunway(
+        _roundPlayers,
+        function(player)  -- onTurnStarted: update audience as each player walks
+            local outfit = _d.outfitSystem.GetPlayerOutfit(player.UserId)
+            local score  = quickOutfitScore(outfit)
+            _d.audienceSystem.UpdateAudience(player, score)
+        end,
+        function()  -- onComplete: advance to voting
+            phaseVoting()
+        end
+    )
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -186,6 +213,10 @@ phaseResults = function()
         if o then _d.metaSystem.UpdateGlobalStyleData(o) end
     end
 
+    -- Audience hype multiplier is global (same for all players this round).
+    -- Fetched once here to avoid repeated log calls inside the loop.
+    local hyped = _d.audienceSystem.GetHypeMultiplier()
+
     -- Combine player votes with JudgeSystem panel scores (AI = 40% of final)
     local finalResults = {}
     for _, player in ipairs(_roundPlayers) do
@@ -194,9 +225,10 @@ phaseResults = function()
         local aiScore   = _d.judgeSystem.ScoreOutfit(player, outfit)
         local pVoteAvg  = avgByPlayer[userId] or 0
 
-        -- Weighted formula: 60% player vote (normalised to 10-pt scale) + 40% AI
+        -- Weighted formula: 60% player vote (normalised to 10-pt scale) + 40% AI,
+        -- then scaled by the audience hype multiplier (max ±10% swing, capped at 10).
         local normVote  = (pVoteAvg / 5) * 10
-        local final     = math.floor((normVote * 0.6 + aiScore * 0.4) * 10 + 0.5) / 10
+        local final     = math.floor(math.min(10.0, (normVote * 0.6 + aiScore * 0.4) * hyped) * 10 + 0.5) / 10
 
         table.insert(finalResults, {
             userId     = userId,
@@ -281,8 +313,8 @@ end
 --- Initialises the module with all dependencies.
 --- @param deps table {
 ---   outfitSystem, votingSystem, sabotageSystem,
----   themeSystem, runwaySystem, judgeSystem, metaSystem, styleDNA,
----   reputationSystem, playerDataManager, logger, remotes
+---   themeSystem, runwaySystem, judgeSystem, metaSystem, audienceSystem,
+---   styleDNA, reputationSystem, playerDataManager, logger, remotes
 --- }
 function RoundManager.Init(deps)
     _d = deps
