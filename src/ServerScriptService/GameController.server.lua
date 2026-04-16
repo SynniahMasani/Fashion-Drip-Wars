@@ -10,6 +10,7 @@
                ├─ ThemeSystem(Logger)
                ├─ MetaSystem(Logger)
                ├─ AudienceSystem(Logger)
+               ├─ PerformanceSystem(Logger, Remotes)
                ├─ MaterialSystem(PlayerDataManager, Logger)
                ├─ ReputationSystem(PlayerDataManager, Logger)
                ├─ StyleDNA(PlayerDataManager, Logger)
@@ -24,6 +25,7 @@
         • SubmitOutfit  – phase check + stun check before forwarding
         • SubmitVote    – phase check before forwarding
         • UseSabotage   – phase check before forwarding
+        • TriggerAction – phase check (RUNWAY only) before forwarding
         • StartRound    – only valid from IDLE (RoundManager guards internally)
 --]]
 
@@ -48,6 +50,7 @@ local PlayerDataManager = loadModule("PlayerDataManager")
 local ThemeSystem       = loadModule("ThemeSystem")
 local MetaSystem        = loadModule("MetaSystem")
 local AudienceSystem    = loadModule("AudienceSystem")
+local PerformanceSystem = loadModule("PerformanceSystem")
 local JudgeSystem       = loadModule("JudgeSystem")
 local StyleDNA          = loadModule("StyleDNA")
 local OutfitSystem      = loadModule("OutfitSystem")
@@ -72,6 +75,7 @@ PlayerDataManager.Init(Logger)
 ThemeSystem.Init(Logger)
 MetaSystem.Init(Logger)
 AudienceSystem.Init(Logger)
+PerformanceSystem.Init(Logger, Remotes)
 MaterialSystem.Init(PlayerDataManager, Logger)
 ReputationSystem.Init(PlayerDataManager, Logger)
 StyleDNA.Init(PlayerDataManager, Logger)
@@ -90,6 +94,7 @@ RoundManager.Init({
     judgeSystem       = JudgeSystem,
     metaSystem        = MetaSystem,
     audienceSystem    = AudienceSystem,
+    performanceSystem = PerformanceSystem,
     styleDNA          = StyleDNA,
     reputationSystem  = ReputationSystem,
     playerDataManager = PlayerDataManager,
@@ -178,6 +183,20 @@ Remotes.UseSabotage.OnServerEvent:Connect(function(player, sabotageType, targetU
             "Sabotage rejected for " .. player.Name .. ": " .. tostring(err))
         -- TODO Phase 2: fire error event back to client
     end
+end)
+
+-- ── Remote: TriggerAction ─────────────────────────────────────────────────────
+-- Client fires with no arguments when the player wants to act during a runway
+-- performance window.  Server evaluates timing authoritatively; the client's
+-- clock is never trusted.  Only accepted during the RUNWAY phase.
+
+Remotes.TriggerAction.OnServerEvent:Connect(function(player)
+    if RoundManager.GetCurrentState() ~= RoundManager.State.RUNWAY then
+        Logger.warn("GameController",
+            player.Name .. " fired TriggerAction outside RUNWAY phase – rejected.")
+        return
+    end
+    PerformanceSystem.RegisterAction(player)
 end)
 
 -- ── Player lifecycle ──────────────────────────────────────────────────────────
