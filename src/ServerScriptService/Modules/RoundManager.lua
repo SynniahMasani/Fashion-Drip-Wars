@@ -25,7 +25,7 @@
     Dependencies (injected via Init as a single deps table):
         outfitSystem, votingSystem, sabotageSystem,
         themeSystem, runwaySystem, judgeSystem, metaSystem, audienceSystem,
-        styleDNA, reputationSystem, playerDataManager, logger, remotes
+        styleDNA, reputationSystem, performanceSystem, playerDataManager, logger, remotes
 
     Public API:
         RoundManager.Init(deps)
@@ -145,8 +145,9 @@ end
 phaseDressing = function()
     setState(RoundManager.State.DRESSING, DURATION.DRESSING)
 
-    -- Clear last round's outfits so stale data can't carry over
+    -- Clear last round's outfits and performance records so stale data can't carry over
     _d.outfitSystem.ClearRoundOutfits(_roundPlayers)
+    _d.performanceSystem.ClearRound()
     _d.outfitSystem.Start()
     _d.sabotageSystem.Start()
 
@@ -169,10 +170,11 @@ phaseRunway = function()
     -- RunwaySystem drives timing internally; calls the callbacks per turn and on completion
     _d.runwaySystem.StartRunway(
         _roundPlayers,
-        function(player)  -- onTurnStarted: update audience as each player walks
+        function(player)  -- onTurnStarted: update audience and open performance windows
             local outfit = _d.outfitSystem.GetPlayerOutfit(player.UserId)
             local score  = quickOutfitScore(outfit)
             _d.audienceSystem.UpdateAudience(player, score)
+            _d.performanceSystem.StartPerformance(player)
         end,
         function()  -- onComplete: advance to voting
             phaseVoting()
@@ -224,17 +226,21 @@ phaseResults = function()
         local outfit    = _d.outfitSystem.GetPlayerOutfit(userId)
         local aiScore   = _d.judgeSystem.ScoreOutfit(player, outfit)
         local pVoteAvg  = avgByPlayer[userId] or 0
+        local perfScore = _d.performanceSystem.GetPerformanceScore(player)
 
         -- Weighted formula: 60% player vote (normalised to 10-pt scale) + 40% AI,
-        -- then scaled by the audience hype multiplier (max ±10% swing, capped at 10).
+        -- plus performance bonus (0–3), then scaled by the audience hype multiplier.
+        -- All capped at 10 before the hype multiply is applied.
         local normVote  = (pVoteAvg / 5) * 10
-        local final     = math.floor(math.min(10.0, (normVote * 0.6 + aiScore * 0.4) * hyped) * 10 + 0.5) / 10
+        local base      = normVote * 0.6 + aiScore * 0.4
+        local final     = math.floor(math.min(10.0, (base + perfScore) * hyped) * 10 + 0.5) / 10
 
         table.insert(finalResults, {
             userId     = userId,
             name       = player.Name,
             aiScore    = aiScore,
             playerVote = pVoteAvg,
+            perfScore  = perfScore,
             finalScore = final,
         })
     end
@@ -277,9 +283,9 @@ phaseResults = function()
         end
 
         _d.logger.info("RoundManager", string.format(
-            "  #%d %-20s  Final: %.1f  (AI: %.1f | Vote: %.1f | Rep: %.1f [%s])",
+            "  #%d %-20s  Final: %.1f  (AI: %.1f | Vote: %.1f | Perf: %.2f | Rep: %.1f [%s])",
             rank, result.name, result.finalScore,
-            result.aiScore, result.playerVote,
+            result.aiScore, result.playerVote, result.perfScore or 0,
             result.reputation or 0, result.repTier or "?"))
     end
 
