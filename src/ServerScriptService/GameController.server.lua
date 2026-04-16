@@ -8,13 +8,15 @@
         Logger
           └─ PlayerDataManager(Logger)
                ├─ ThemeSystem(Logger)
-               ├─ AIJudge(Logger)
+               ├─ MaterialSystem(PlayerDataManager, Logger)
+               ├─ ReputationSystem(PlayerDataManager, Logger)
                ├─ StyleDNA(PlayerDataManager, Logger)
-               ├─ OutfitSystem(PlayerDataManager, StyleDNA, Logger)
+               │    └─ JudgeSystem(StyleDNA, MaterialSystem, ThemeSystem, Logger)
+               ├─ OutfitSystem(PlayerDataManager, StyleDNA, MaterialSystem, Logger)
                ├─ VotingSystem(PlayerDataManager, Logger)
                ├─ SabotageSystem(PlayerDataManager, Logger, Remotes, Players)
                ├─ RunwaySystem(Logger, Remotes)
-               └─ RoundManager({all above + StyleDNA, Remotes})
+               └─ RoundManager({all above, Remotes})
 
     Server-authoritative rules enforced here:
         • SubmitOutfit  – phase check + stun check before forwarding
@@ -42,7 +44,7 @@ end
 local Logger            = loadModule("Logger")
 local PlayerDataManager = loadModule("PlayerDataManager")
 local ThemeSystem       = loadModule("ThemeSystem")
-local AIJudge           = loadModule("AIJudge")
+local JudgeSystem       = loadModule("JudgeSystem")
 local StyleDNA          = loadModule("StyleDNA")
 local OutfitSystem      = loadModule("OutfitSystem")
 local VotingSystem      = loadModule("VotingSystem")
@@ -65,9 +67,9 @@ Logger.info("GameController", "========================================")
 PlayerDataManager.Init(Logger)
 ThemeSystem.Init(Logger)
 MaterialSystem.Init(PlayerDataManager, Logger)
-AIJudge.Init(MaterialSystem, Logger)
 ReputationSystem.Init(PlayerDataManager, Logger)
 StyleDNA.Init(PlayerDataManager, Logger)
+JudgeSystem.Init(StyleDNA, MaterialSystem, ThemeSystem, Logger)
 OutfitSystem.Init(PlayerDataManager, StyleDNA, MaterialSystem, Logger)
 VotingSystem.Init(PlayerDataManager, Logger)
 SabotageSystem.Init(PlayerDataManager, Logger, Remotes, Players)
@@ -79,7 +81,7 @@ RoundManager.Init({
     sabotageSystem    = SabotageSystem,
     themeSystem       = ThemeSystem,
     runwaySystem      = RunwaySystem,
-    aiJudge           = AIJudge,
+    judgeSystem       = JudgeSystem,
     styleDNA          = StyleDNA,
     reputationSystem  = ReputationSystem,
     playerDataManager = PlayerDataManager,

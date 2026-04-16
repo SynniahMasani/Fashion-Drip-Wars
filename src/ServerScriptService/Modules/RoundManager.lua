@@ -24,7 +24,7 @@
 
     Dependencies (injected via Init as a single deps table):
         outfitSystem, votingSystem, sabotageSystem,
-        themeSystem, runwaySystem, aiJudge, styleDNA, reputationSystem,
+        themeSystem, runwaySystem, judgeSystem, styleDNA, reputationSystem,
         playerDataManager, logger, remotes
 
     Public API:
@@ -116,6 +116,9 @@ phaseThemeSelection = function()
     _d.remotes.ThemeSelected:FireAllClients(theme.name, theme.description, theme.tags)
     _d.logger.info("RoundManager", 'Theme: "' .. theme.name .. '"')
 
+    -- Select the judging panel now that the theme is known
+    _d.judgeSystem.SelectJudgesForRound()
+
     _phaseThread = task.delay(DURATION.THEME_SELECTION, phaseDressing)
 end
 
@@ -168,7 +171,6 @@ phaseResults = function()
     _d.votingSystem.CloseVoting()
     setState(RoundManager.State.RESULTS, DURATION.RESULTS)
 
-    local theme    = _d.themeSystem.GetCurrentTheme()
     local voteTally = _d.votingSystem.TallyVotes()  -- []{userId,voteCount,totalStars,average}
 
     -- Build a lookup: userId -> average player vote
@@ -177,12 +179,12 @@ phaseResults = function()
         avgByPlayer[entry.userId] = entry.average
     end
 
-    -- Combine player votes with AI judge scores
+    -- Combine player votes with JudgeSystem panel scores (AI = 40% of final)
     local finalResults = {}
     for _, player in ipairs(_roundPlayers) do
         local userId    = player.UserId
         local outfit    = _d.outfitSystem.GetPlayerOutfit(userId)
-        local aiScore   = _d.aiJudge.ScoreOutfit(outfit, theme)
+        local aiScore   = _d.judgeSystem.ScoreOutfit(player, outfit)
         local pVoteAvg  = avgByPlayer[userId] or 0
 
         -- Weighted formula: 60% player vote (normalised to 10-pt scale) + 40% AI
@@ -267,7 +269,7 @@ end
 --- Initialises the module with all dependencies.
 --- @param deps table {
 ---   outfitSystem, votingSystem, sabotageSystem,
----   themeSystem, runwaySystem, aiJudge, styleDNA, reputationSystem,
+---   themeSystem, runwaySystem, judgeSystem, styleDNA, reputationSystem,
 ---   playerDataManager, logger, remotes
 --- }
 function RoundManager.Init(deps)
