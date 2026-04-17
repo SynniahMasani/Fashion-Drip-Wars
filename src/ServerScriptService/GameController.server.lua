@@ -15,7 +15,8 @@
                ├─ MaterialSystem(PlayerDataManager, Logger)
                ├─ ReputationSystem(PlayerDataManager, Logger)
                ├─ StyleDNA(PlayerDataManager, Logger)
-               │    └─ JudgeSystem(StyleDNA, MaterialSystem, ThemeSystem, MetaSystem, Logger)
+               │    ├─ JudgeSystem(StyleDNA, MaterialSystem, ThemeSystem, MetaSystem, Logger)
+               │    └─ IdentitySystem(StyleDNA, ReputationSystem, DynamicsSystem, PlayerDataManager, Logger)
                ├─ OutfitSystem(PlayerDataManager, StyleDNA, MaterialSystem, Logger)
                ├─ VotingSystem(PlayerDataManager, Logger)
                ├─ SabotageSystem(PlayerDataManager, Logger, Remotes, Players)
@@ -54,6 +55,7 @@ local MetaSystem        = loadModule("MetaSystem")
 local AudienceSystem    = loadModule("AudienceSystem")
 local PerformanceSystem = loadModule("PerformanceSystem")
 local DynamicsSystem    = loadModule("DynamicsSystem")
+local IdentitySystem    = loadModule("IdentitySystem")
 local JudgeSystem       = loadModule("JudgeSystem")
 local StyleDNA          = loadModule("StyleDNA")
 local OutfitSystem      = loadModule("OutfitSystem")
@@ -90,6 +92,7 @@ DynamicsSystem.Init(Logger)
 MaterialSystem.Init(PlayerDataManager, Logger)
 ReputationSystem.Init(PlayerDataManager, Logger)
 StyleDNA.Init(PlayerDataManager, Logger)
+IdentitySystem.Init(StyleDNA, ReputationSystem, DynamicsSystem, PlayerDataManager, Logger)
 JudgeSystem.Init(StyleDNA, MaterialSystem, ThemeSystem, MetaSystem, Logger)
 OutfitSystem.Init(PlayerDataManager, StyleDNA, MaterialSystem, Logger)
 VotingSystem.Init(PlayerDataManager, Logger)
@@ -107,6 +110,7 @@ RoundManager.Init({
     audienceSystem    = AudienceSystem,
     performanceSystem = PerformanceSystem,
     dynamicsSystem    = DynamicsSystem,
+    identitySystem    = IdentitySystem,
     styleDNA          = StyleDNA,
     reputationSystem  = ReputationSystem,
     playerDataManager = PlayerDataManager,
