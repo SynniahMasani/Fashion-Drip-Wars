@@ -11,6 +11,7 @@
                ├─ MetaSystem(Logger)
                ├─ AudienceSystem(Logger)
                ├─ PerformanceSystem(Logger, Remotes)
+               ├─ DynamicsSystem(Logger)
                ├─ MaterialSystem(PlayerDataManager, Logger)
                ├─ ReputationSystem(PlayerDataManager, Logger)
                ├─ StyleDNA(PlayerDataManager, Logger)
@@ -52,6 +53,7 @@ local ThemeSystem       = loadModule("ThemeSystem")
 local MetaSystem        = loadModule("MetaSystem")
 local AudienceSystem    = loadModule("AudienceSystem")
 local PerformanceSystem = loadModule("PerformanceSystem")
+local DynamicsSystem    = loadModule("DynamicsSystem")
 local JudgeSystem       = loadModule("JudgeSystem")
 local StyleDNA          = loadModule("StyleDNA")
 local OutfitSystem      = loadModule("OutfitSystem")
@@ -84,6 +86,7 @@ ThemeSystem.Init(Logger)
 MetaSystem.Init(Logger)
 AudienceSystem.Init(Logger)
 PerformanceSystem.Init(Logger, Remotes)
+DynamicsSystem.Init(Logger)
 MaterialSystem.Init(PlayerDataManager, Logger)
 ReputationSystem.Init(PlayerDataManager, Logger)
 StyleDNA.Init(PlayerDataManager, Logger)
@@ -103,6 +106,7 @@ RoundManager.Init({
     metaSystem        = MetaSystem,
     audienceSystem    = AudienceSystem,
     performanceSystem = PerformanceSystem,
+    dynamicsSystem    = DynamicsSystem,
     styleDNA          = StyleDNA,
     reputationSystem  = ReputationSystem,
     playerDataManager = PlayerDataManager,
