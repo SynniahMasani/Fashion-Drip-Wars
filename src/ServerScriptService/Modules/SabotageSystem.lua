@@ -26,7 +26,7 @@
     Dependencies (injected via Init):
         PlayerDataManager, Logger, Remotes, PlayersService
 
-    Public API:
+    ── Public API ────────────────────────────────────────────────────────────────
         SabotageSystem.Init(playerDataManager, logger, remotes, playersService)
         SabotageSystem.Start()
         SabotageSystem.Stop()
@@ -77,8 +77,7 @@ local _remotes           = nil
 local _playersService    = nil
 local _isRunning         = false
 
---- Per-player, per-type cooldown timestamps.
---- { [userId: number]: { [sabotageType: string]: lastUsedClock: number } }
+-- { [userId]: { [sabotageType]: lastUsedClock } }
 local _cooldowns = {}
 --- Per-player, per-type count in the current round.
 --- { [userId: number]: { [sabotageType: string]: number } }
@@ -135,7 +134,6 @@ local function applyPaintRandomizer(player, targetUserId)
         r2 = c2.r, g2 = c2.g, b2 = c2.b,
     })
 
-    -- Notify the target's client for visual feedback
     local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
     if targetPlayer then
         _remotes.SabotageApplied:FireClient(targetPlayer, EFFECT_PAINT_RANDOMIZER, {
@@ -156,7 +154,6 @@ local function applyTemporaryStun(player, targetUserId)
         expiresAt = expiresAt,
     })
 
-    -- Notify the target's client so they see the stun UI
     local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
     if targetPlayer then
         _remotes.SabotageApplied:FireClient(targetPlayer, EFFECT_TEMPORARY_STUN, {
@@ -212,10 +209,10 @@ local function applyEffect(player, sabotageType, targetUserId)
     elseif sabotageType == "CLEANSE" then
         applyCleanse(player, targetUserId)
     else
-        -- Stub: log only until Phase 2 implements the effect
+        -- Phase 3 stub
         _logger.info("SabotageSystem",
             player.Name .. " used [" .. sabotageType .. "] on UserId "
-            .. tostring(targetUserId) .. " (effect stub – Phase 2)")
+            .. tostring(targetUserId) .. " (stub – Phase 3)")
     end
 end
 
@@ -240,7 +237,7 @@ function SabotageSystem.Start()
     _logger.info("SabotageSystem", "Started.")
 end
 
---- Disarms the system and clears all cooldown records for this round.
+--- Disarms the system and clears all per-round tracking tables.
 function SabotageSystem.Stop()
     _cooldowns = {}
     _roundUses = {}
@@ -250,6 +247,8 @@ end
 
 --- Validates and, if valid, applies a sabotage action.
 --- Returns (true, nil) on success or (false, errorMsg) on rejection.
+--- Note: for DEFENSIVE types (MIRROR_SHIELD, CLEANSE), targetUserId should be
+--- the initiator's own UserId; GameController enforces IsPlayerInActiveRound for both.
 --- @param player        Player
 --- @param sabotageType  string
 --- @param targetUserId  number
