@@ -41,8 +41,8 @@
         SabotageSystem.Start()
         SabotageSystem.Stop()
         SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId) -> (bool, string|nil)
-        SabotageSystem.GetSabotageTypes()     -> string[]
-        SabotageSystem.GetSabotageProfile(userId) -> table
+        SabotageSystem.GetSabotageTypes() -> string[]
+        SabotageSystem.GetSabotageTypeMeta(sabotageType) -> table|nil
 --]]
 
 local SabotageSystem = {}
@@ -51,55 +51,12 @@ local SabotageSystem = {}
 -- Add new types here; the rest of the module stays unchanged.
 
 local SABOTAGE_TYPES = {
-    PAINT_RANDOMIZER = {
-        cooldown     = 45,
-        maxPerRound  = 1,
-        category     = "OFFENSIVE",
-        selfTarget   = false,
-        description  = "Randomises the target's outfit colours on next submission.",
-    },
-    TEMPORARY_STUN = {
-        cooldown     = 60,
-        maxPerRound  = 1,
-        category     = "OFFENSIVE",
-        selfTarget   = false,
-        description  = "Blocks outfit submission for " .. tostring(10) .. " seconds.",
-    },
-    STYLE_SCRAMBLE = {
-        cooldown     = 50,
-        maxPerRound  = 1,
-        category     = "OFFENSIVE",
-        selfTarget   = false,
-        description  = "Replaces target's style tags with random valid tags on next submission.",
-    },
-    OUTFIT_CURSE = {
-        cooldown     = 70,
-        maxPerRound  = 1,
-        category     = "OFFENSIVE",
-        selfTarget   = false,
-        description  = "Removes one random filled outfit slot on target's next submission.",
-    },
-    MIRROR_SHIELD = {
-        cooldown     = 30,
-        maxPerRound  = 1,
-        category     = "DEFENSIVE",
-        selfTarget   = true,
-        description  = "Intercepts the next incoming offensive sabotage. Attacker cooldown is still consumed.",
-    },
-    CLEANSE = {
-        cooldown     = 45,
-        maxPerRound  = 1,
-        category     = "DEFENSIVE",
-        selfTarget   = true,
-        description  = "Removes all active offensive effects from yourself immediately.",
-    },
-    MATERIAL_STEAL = {
-        cooldown     = 90,
-        maxPerRound  = 1,
-        category     = "OFFENSIVE",
-        selfTarget   = false,
-        description  = "Steals a material from target's inventory. (Phase 3 stub)",
-    },
+    PAINT_RANDOMIZER = { cooldown = 45,  targetMode = "opponent", description = "Randomises the target's outfit colours." },
+    TEMPORARY_STUN   = { cooldown = 60,  targetMode = "opponent", description = "Blocks outfit submission for 10 seconds." },
+    STYLE_SCRAMBLE   = { cooldown = 60,  targetMode = "opponent", description = "Scrambles outfit style tags. (Phase 2)" },
+    MATERIAL_STEAL   = { cooldown = 90,  targetMode = "opponent", description = "Steals a material from inventory. (Phase 2)" },
+    MIRROR_SHIELD    = { cooldown = 45,  targetMode = "self",     description = "Blocks/reflects incoming sabotage. (Phase 2)" },
+    CLEANSE          = { cooldown = 45,  targetMode = "self",     description = "Clears active negative effects. (Phase 2)" },
 }
 
 -- Canonical list of offensive effect keys used for stacking limits and CLEANSE.
@@ -367,9 +324,10 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
         return false, "SabotageSystem is not running."
     end
 
+    local sabotageDef = SABOTAGE_TYPES[sabotageType]
+
     -- Whitelist check
-    local typeInfo = SABOTAGE_TYPES[sabotageType]
-    if not typeInfo then
+    if not sabotageDef then
         _logger.warn("SabotageSystem",
             "Unknown sabotage type '" .. tostring(sabotageType)
             .. "' from " .. player.Name)
@@ -389,9 +347,15 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
         return false, "Target player not found."
     end
 
-    -- Self-target gate: OFFENSIVE types cannot target self; DEFENSIVE types MUST
-    if not typeInfo.selfTarget and player.UserId == targetUserId then
-        return false, "Cannot sabotage yourself."
+    -- Targeting-mode check (server-authoritative).
+    -- Defensive/self-target sabotage must target the initiator only.
+    -- Offensive sabotage must target a different player.
+    if sabotageDef.targetMode == "self" then
+        if targetUserId ~= player.UserId then
+            return false, "This sabotage must target yourself."
+        end
+    elseif player.UserId == targetUserId then
+        return false, "Cannot target yourself with this sabotage."
     end
     if typeInfo.selfTarget and player.UserId ~= targetUserId then
         return false, "This ability can only target yourself."
@@ -461,22 +425,12 @@ function SabotageSystem.GetSabotageTypes()
     return list
 end
 
---- Returns the current sabotage profile for a player (cooldowns, uses, metadata).
---- Intended for UI display and debug tooling only — not used server-side.
---- @param userId  number
---- @return table
-function SabotageSystem.GetSabotageProfile(userId)
-    local profile = { types = {} }
-    for typeName, typeInfo in pairs(SABOTAGE_TYPES) do
-        profile.types[typeName] = {
-            cooldownLeft = cooldownRemaining(userId, typeName),
-            usesLeft     = roundUsesRemaining(userId, typeName),
-            category     = typeInfo.category,
-            selfTarget   = typeInfo.selfTarget,
-            description  = typeInfo.description,
-        }
-    end
-    return profile
+--- Returns sabotage metadata for a type, or nil if unknown.
+--- Shape: { cooldown: number, targetMode: "self"|"opponent", description: string }
+--- @param sabotageType string
+--- @return table|nil
+function SabotageSystem.GetSabotageTypeMeta(sabotageType)
+    return SABOTAGE_TYPES[sabotageType]
 end
 
 return SabotageSystem
