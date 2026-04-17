@@ -1,22 +1,20 @@
 --[[
-    AIJudge
-    ───────
-    Provides an automated score for each player's outfit at the end of a round.
+    AIJudge  *** SUPERSEDED — DO NOT USE ***
+    ────────────────────────────────────────
+    This module has been replaced by JudgeSystem (Modules/JudgeSystem.lua),
+    which provides a personality-driven panel of judges with StyleDNA affinity,
+    material bonuses, and meta-shift modifiers.
 
-    Phase 0: randomised score within a realistic range (3.0 – 9.5).
-    Phase 1 hooks are documented inline – no structural change required to
-    upgrade; just fill in the TODO sections.
+    GameController no longer loads AIJudge.  This file is retained for reference
+    only.  It will be removed in a future cleanup pass.
 
-    Score scale: 1.0 – 10.0, rounded to one decimal place.
-    Weights are applied to a 0–10 axis so player votes and AI scores combine
-    cleanly in RoundManager.
+    Original purpose:
+        Phase 0 randomised scorer (3.0 – 9.5) with stub material bonuses.
 
-    Dependencies (injected via Init):
-        MaterialSystem, Logger
-
-    Public API:
-        AIJudge.Init(materialSystem, logger)
-        AIJudge.ScoreOutfit(outfitData, theme) -> number
+    Replaced by:
+        JudgeSystem.Init(styleDNA, materialSystem, themeSystem, metaSystem, logger)
+        JudgeSystem.SelectJudgesForRound()
+        JudgeSystem.ScoreOutfit(player, outfitData) -> number (1.0 – 10.0)
 --]]
 
 local AIJudge = {}

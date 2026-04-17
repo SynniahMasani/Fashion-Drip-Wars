@@ -215,6 +215,26 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
         return false, string.format("Sabotage on cooldown (%.0fs remaining).", remaining)
     end
 
+    -- Redundant active-effect check: reject if the same effect is already pending
+    -- on the target to prevent wasted slots and confusing UI states.
+    if sabotageType == "TEMPORARY_STUN" then
+        local existing = _playerDataManager.GetEffect(targetUserId, "TEMPORARY_STUN")
+        if existing and os.clock() < existing.expiresAt then
+            _logger.warn("SabotageSystem",
+                "TEMPORARY_STUN already active on UserId "
+                .. tostring(targetUserId) .. " – rejected.")
+            return false, "Target is already stunned."
+        end
+    elseif sabotageType == "PAINT_RANDOMIZER" then
+        local existing = _playerDataManager.GetEffect(targetUserId, "PAINT_RANDOMIZER")
+        if existing then
+            _logger.warn("SabotageSystem",
+                "PAINT_RANDOMIZER already pending on UserId "
+                .. tostring(targetUserId) .. " – rejected.")
+            return false, "Target already has a pending paint effect."
+        end
+    end
+
     -- All checks passed – commit
     recordUsage(player.UserId, sabotageType)
     applyEffect(player, sabotageType, targetUserId)

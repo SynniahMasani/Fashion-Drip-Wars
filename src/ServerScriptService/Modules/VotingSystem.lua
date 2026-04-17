@@ -156,10 +156,12 @@ function VotingSystem.SubmitVote(voter, targetUserId, starRating)
 end
 
 --- Tallies votes and returns results sorted by average star rating (descending).
+--- Every eligible target is included in the result even if they received zero
+--- votes, ensuring RoundManager scoring never silently skips a player.
 --- Safe to call before CloseVoting for live leaderboards.
 --- @return VoteResult[]
 function VotingSystem.TallyVotes()
-    -- Accumulate per-target totals
+    -- Accumulate per-target totals from recorded votes
     local tally = {} -- [targetUserId] -> { total, count }
     for _, vote in pairs(_votes) do
         local t = vote.targetUserId
@@ -168,11 +170,13 @@ function VotingSystem.TallyVotes()
         tally[t].count = tally[t].count + 1
     end
 
-    -- Build result list
+    -- Build result list covering ALL eligible targets, including zero-vote players
     local results = {}
-    for userId, data in pairs(tally) do
-        local avg = data.total / data.count
-        avg = math.floor(avg * 10 + 0.5) / 10  -- round to 1 decimal
+    for userId in pairs(_eligibleTargets) do
+        local data = tally[userId] or { total = 0, count = 0 }
+        local avg  = data.count > 0
+            and (math.floor((data.total / data.count) * 10 + 0.5) / 10)
+            or  0
         table.insert(results, {
             userId     = userId,
             voteCount  = data.count,
@@ -183,8 +187,11 @@ function VotingSystem.TallyVotes()
 
     table.sort(results, function(a, b) return a.average > b.average end)
 
-    _logger.info("VotingSystem",
-        "Votes tallied. " .. #results .. " player(s) received votes.")
+    local voted = 0
+    for _ in pairs(tally) do voted = voted + 1 end
+    _logger.info("VotingSystem", string.format(
+        "Votes tallied. %d/%d eligible target(s) received votes.",
+        voted, #results))
     return results
 end
 

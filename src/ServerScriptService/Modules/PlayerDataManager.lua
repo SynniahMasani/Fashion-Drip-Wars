@@ -30,10 +30,15 @@
         PlayerDataManager.SetPlayerData(userId, key, value) -> boolean
         PlayerDataManager.RemovePlayerData(userId)
         PlayerDataManager.GetAllData()                      -> {[userId]: PlayerData}
+        -- NOTE: GetAllData returns a shallow map copy. The values are still
+        -- references to the live PlayerData tables — mutations to them DO affect
+        -- the store.  Treat returned tables as read-only unless you need to write
+        -- via SetPlayerData/SetEffect/ClearEffect.
         -- ActiveEffects helpers (thin wrappers over PlayerData.ActiveEffects):
         PlayerDataManager.SetEffect(userId, effectType, effectData) -> boolean
         PlayerDataManager.GetEffect(userId, effectType)     -> any | nil
         PlayerDataManager.ClearEffect(userId, effectType)   -> boolean
+        PlayerDataManager.ClearAllEffects(userId)           -> boolean
 --]]
 
 local PlayerDataManager = {}
@@ -128,7 +133,9 @@ function PlayerDataManager.RemovePlayerData(userId)
     end
 end
 
---- Returns a shallow snapshot of the entire store (mutations do NOT affect the store).
+--- Returns a shallow map of the entire store.  The map itself is a new table,
+--- but the PlayerData values inside it are live references — mutations to those
+--- tables affect the store.  Treat returned values as read-only.
 --- @return {[number]: PlayerData}
 function PlayerDataManager.GetAllData()
     local snapshot = {}
@@ -180,6 +187,22 @@ function PlayerDataManager.ClearEffect(userId, effectType)
         return false
     end
     data.ActiveEffects[effectType] = nil
+    return true
+end
+
+--- Removes ALL active effects from a player's record.
+--- Used at round-start to ensure no sabotage effects bleed across rounds.
+--- Returns true on success, false if the record doesn't exist.
+--- @param userId  number
+--- @return boolean
+function PlayerDataManager.ClearAllEffects(userId)
+    local data = _store[userId]
+    if not data then
+        _logger.warn("PlayerDataManager",
+            "ClearAllEffects: no record for UserId " .. tostring(userId))
+        return false
+    end
+    data.ActiveEffects = {}
     return true
 end
 
