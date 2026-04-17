@@ -421,6 +421,19 @@ phaseResults = function()
         _d.styleDNA.RecalculateDominantStyle(player.UserId)
     end
 
+    -- Update identity profiles (career stats, title awards) after both streaks and
+    -- StyleDNA are settled so archetypes and title checks see current state.
+    -- playerById is still in scope from the reputation loop above.
+    -- Players who left mid-round are guarded by the GetPlayerData check inside
+    -- UpdateAfterRound, consistent with the reputation-update guard above.
+    local totalRoundPlayers = #finalResults
+    for _, result in ipairs(finalResults) do
+        local player = playerById[result.userId]
+        if player then
+            _d.identitySystem.UpdateAfterRound(player, result, totalRoundPlayers)
+        end
+    end
+
     -- Broadcast results to all clients
     _d.remotes.RoundResults:FireAllClients(finalResults)
     _d.logger.info("RoundManager", "Round #" .. _roundNumber .. " results broadcast.")
@@ -446,7 +459,7 @@ end
 --- @param deps table {
 ---   outfitSystem, votingSystem, sabotageSystem,
 ---   themeSystem, runwaySystem, judgeSystem, metaSystem, audienceSystem,
----   styleDNA, reputationSystem, performanceSystem, dynamicsSystem,
+---   styleDNA, reputationSystem, performanceSystem, dynamicsSystem, identitySystem,
 ---   playerDataManager, logger, remotes
 --- }
 function RoundManager.Init(deps)
