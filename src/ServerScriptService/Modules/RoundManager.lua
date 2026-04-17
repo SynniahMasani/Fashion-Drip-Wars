@@ -32,10 +32,13 @@
         RoundManager.Start()
         RoundManager.Stop()
         RoundManager.StartRound(players)
-        RoundManager.GetCurrentState()  -> string
-        RoundManager.GetRoundNumber()   -> number
-        RoundManager.State              -> { IDLE, LOBBY, THEME_SELECTION,
-                                             DRESSING, RUNWAY, VOTING, RESULTS }
+        RoundManager.GetCurrentState()              -> string
+        RoundManager.GetRoundNumber()               -> number
+        RoundManager.HandlePlayerLeft(userId)       -- call from GameController PlayerRemoving
+        RoundManager.IsPlayerInActiveRound(userId)  -> boolean
+        RoundManager.GetActiveRoundPlayers()        -> Player[]
+        RoundManager.State                          -> { IDLE, LOBBY, THEME_SELECTION,
+                                                         DRESSING, RUNWAY, VOTING, RESULTS }
 --]]
 
 local RoundManager = {}
@@ -69,7 +72,10 @@ local _isRunning    = false
 local _currentState = RoundManager.State.IDLE
 local _roundNumber  = 0
 local _phaseThread  = nil  -- cancellable task thread for timed transitions
-local _roundPlayers = {}   -- Player[] for the active round
+local _roundPlayers = {}   -- Player[] snapshot at round start (never pruned)
+-- Live membership set: entries are removed as players disconnect mid-round so
+-- systems can quickly test whether a userId is still an active participant.
+local _activePlayerSet = {}  -- { [userId: number]: Player }
 
 -- ── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -148,6 +154,14 @@ phaseDressing = function()
     -- Clear last round's outfits and performance records so stale data can't carry over
     _d.outfitSystem.ClearRoundOutfits(_roundPlayers)
     _d.performanceSystem.ClearRound()
+
+    -- Flush round-scoped sabotage effects (e.g. PAINT_RANDOMIZER that was set
+    -- but never consumed because the player never submitted an outfit, or a
+    -- TEMPORARY_STUN whose timer crossed a round boundary).
+    for _, player in ipairs(_roundPlayers) do
+        _d.playerDataManager.ClearAllEffects(player.UserId)
+    end
+
     _d.outfitSystem.Start()
     _d.sabotageSystem.Start()
 
@@ -265,21 +279,31 @@ phaseResults = function()
 
         local player = playerById[result.userId]
         if player then
-            local roundResult = {
-                userId       = result.userId,
-                rank         = rank,
-                totalPlayers = #_roundPlayers,
-                finalScore   = result.finalScore,
-                playerVote   = result.playerVote,
-                aiScore      = result.aiScore,
-                rawVotes     = rawVoteMap[result.userId] or {},
-                roundNumber  = _roundNumber,
-            }
-            _d.reputationSystem.UpdateReputation(player, roundResult)
+            -- Only update reputation for players whose data is still present.
+            -- Players who left mid-round had their PlayerData removed in GameController;
+            -- skip them here to avoid the warn-and-return path in ReputationSystem.
+            if not _d.playerDataManager.GetPlayerData(result.userId) then
+                _d.logger.info("RoundManager",
+                    player.Name .. " left mid-round – reputation update skipped.")
+                result.reputation = 0
+                result.repTier    = "Newcomer"
+            else
+                local roundResult = {
+                    userId       = result.userId,
+                    rank         = rank,
+                    totalPlayers = #_roundPlayers,
+                    finalScore   = result.finalScore,
+                    playerVote   = result.playerVote,
+                    aiScore      = result.aiScore,
+                    rawVotes     = rawVoteMap[result.userId] or {},
+                    roundNumber  = _roundNumber,
+                }
+                _d.reputationSystem.UpdateReputation(player, roundResult)
 
-            local repProfile = _d.reputationSystem.GetReputation(player)
-            result.reputation = repProfile and repProfile.score or 0
-            result.repTier    = repProfile and repProfile.tier  or "Newcomer"
+                local repProfile = _d.reputationSystem.GetReputation(player)
+                result.reputation = repProfile and repProfile.score or 0
+                result.repTier    = repProfile and repProfile.tier  or "Newcomer"
+            end
         end
 
         _d.logger.info("RoundManager", string.format(
@@ -368,6 +392,12 @@ function RoundManager.StartRound(players)
     _roundNumber  = _roundNumber + 1
     _roundPlayers = players
 
+    -- Build the live participant set (pruned on disconnect via HandlePlayerLeft)
+    _activePlayerSet = {}
+    for _, player in ipairs(players) do
+        _activePlayerSet[player.UserId] = player
+    end
+
     _d.logger.info("RoundManager",
         "=== Round #" .. _roundNumber .. " START ==="
         .. "  Players: " .. #players)
@@ -385,6 +415,38 @@ end
 --- @return number
 function RoundManager.GetRoundNumber()
     return _roundNumber
+end
+
+--- Called by GameController's PlayerRemoving handler.
+--- Removes the player from the live participant set so systems that call
+--- IsPlayerInActiveRound (e.g. sabotage checks) see them as gone immediately.
+--- @param userId  number
+function RoundManager.HandlePlayerLeft(userId)
+    if _activePlayerSet[userId] then
+        _activePlayerSet[userId] = nil
+        _d.logger.info("RoundManager",
+            "UserId " .. tostring(userId) .. " removed from active round participant set.")
+    end
+end
+
+--- Returns true while a round is active and the given player is still a participant.
+--- Returns false when no round is in progress or the player disconnected.
+--- @param userId  number
+--- @return boolean
+function RoundManager.IsPlayerInActiveRound(userId)
+    return _activePlayerSet[userId] ~= nil
+end
+
+--- Returns a list of players who are still actively participating in the current round.
+--- Excludes any player who disconnected after the round began.
+--- Returns an empty table when no round is in progress.
+--- @return Player[]
+function RoundManager.GetActiveRoundPlayers()
+    local result = {}
+    for _, player in pairs(_activePlayerSet) do
+        table.insert(result, player)
+    end
+    return result
 end
 
 return RoundManager

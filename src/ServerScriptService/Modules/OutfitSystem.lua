@@ -37,6 +37,12 @@
 
 local OutfitSystem = {}
 
+-- ── Constants ────────────────────────────────────────────────────────────────
+
+local MAX_ACCESSORIES = 5
+local MAX_MATERIALS   = 3   -- must match MaterialSystem.MAX_MATERIALS_PER_OUTFIT
+local MAX_STYLE_TAGS  = 10
+
 -- ── Private state ────────────────────────────────────────────────────────────
 
 local _playerDataManager = nil
@@ -47,8 +53,28 @@ local _isRunning         = false
 
 -- ── Internal validation ───────────────────────────────────────────────────────
 
---- Validates the basic structure of an outfit submission.
---- Phase 1: add item-ID ownership checks, slot-count limits, banned IDs.
+--- Validates a color sub-table: must have r, g, b as numbers in [0, 1].
+--- @param c          any
+--- @param fieldName  string  used in the error message
+--- @return boolean, string|nil
+local function validateColor(c, fieldName)
+    if c == nil then return true, nil end  -- colors are optional
+    if type(c) ~= "table" then
+        return false, fieldName .. " must be a table with r/g/b fields."
+    end
+    for _, ch in ipairs({ "r", "g", "b" }) do
+        local v = c[ch]
+        if type(v) ~= "number" or v < 0 or v > 1 then
+            return false,
+                fieldName .. "." .. ch .. " must be a number in [0, 1]."
+        end
+    end
+    return true, nil
+end
+
+--- Deep-validates an outfit payload from a client.
+--- Rejects wrong types, oversized arrays, non-numeric IDs, non-string tags.
+--- Phase 2: add item-ID catalogue ownership checks here.
 --- @param outfitData  any
 --- @return boolean, string|nil
 local function validateOutfit(outfitData)
@@ -56,36 +82,109 @@ local function validateOutfit(outfitData)
         return false, "outfitData must be a table, got " .. type(outfitData)
     end
 
-    -- AccessoryIds must be a table if provided
-    if outfitData.AccessoryIds ~= nil and type(outfitData.AccessoryIds) ~= "table" then
-        return false, "AccessoryIds must be a table."
+    -- Slot IDs must be positive integers or nil
+    for _, slot in ipairs({ "HeadId", "TopId", "BottomId", "ShoesId" }) do
+        local v = outfitData[slot]
+        if v ~= nil and (type(v) ~= "number" or v <= 0 or v ~= math.floor(v)) then
+            return false, slot .. " must be a positive integer or nil."
+        end
     end
 
-    -- Clamp accessory count to 5
-    if outfitData.AccessoryIds and #outfitData.AccessoryIds > 5 then
-        return false, "Cannot equip more than 5 accessories."
+    -- AccessoryIds: table of numbers, max MAX_ACCESSORIES
+    if outfitData.AccessoryIds ~= nil then
+        if type(outfitData.AccessoryIds) ~= "table" then
+            return false, "AccessoryIds must be a table."
+        end
+        if #outfitData.AccessoryIds > MAX_ACCESSORIES then
+            return false, "Cannot equip more than " .. MAX_ACCESSORIES .. " accessories."
+        end
+        for i, v in ipairs(outfitData.AccessoryIds) do
+            if type(v) ~= "number" or v <= 0 or v ~= math.floor(v) then
+                return false, "AccessoryIds[" .. i .. "] must be a positive integer."
+            end
+        end
     end
 
-    -- StyleTags must be a table if provided
-    if outfitData.StyleTags ~= nil and type(outfitData.StyleTags) ~= "table" then
-        return false, "StyleTags must be a table."
+    -- Materials: table of strings, max MAX_MATERIALS
+    if outfitData.Materials ~= nil then
+        if type(outfitData.Materials) ~= "table" then
+            return false, "Materials must be a table."
+        end
+        if #outfitData.Materials > MAX_MATERIALS then
+            return false, "Cannot use more than " .. MAX_MATERIALS .. " materials."
+        end
+        for i, v in ipairs(outfitData.Materials) do
+            if type(v) ~= "string" or #v == 0 then
+                return false, "Materials[" .. i .. "] must be a non-empty string."
+            end
+        end
     end
 
-    -- Materials must be a table if provided (ownership checked separately)
-    if outfitData.Materials ~= nil and type(outfitData.Materials) ~= "table" then
-        return false, "Materials must be a table."
+    -- StyleTags: table of strings, max MAX_STYLE_TAGS
+    if outfitData.StyleTags ~= nil then
+        if type(outfitData.StyleTags) ~= "table" then
+            return false, "StyleTags must be a table."
+        end
+        if #outfitData.StyleTags > MAX_STYLE_TAGS then
+            return false, "Too many StyleTags (max " .. MAX_STYLE_TAGS .. ")."
+        end
+        for i, v in ipairs(outfitData.StyleTags) do
+            if type(v) ~= "string" or #v == 0 then
+                return false, "StyleTags[" .. i .. "] must be a non-empty string."
+            end
+        end
     end
 
-    -- TODO Phase 1: verify HeadId / TopId / BottomId / ShoesId are valid catalogue IDs
-    -- TODO Phase 1: verify player owns the items in their inventory
+    -- Colors: must have valid r/g/b fields
+    local ok, err = validateColor(outfitData.ColorPrimary,   "ColorPrimary")
+    if not ok then return false, err end
+    ok, err       = validateColor(outfitData.ColorSecondary, "ColorSecondary")
+    if not ok then return false, err end
+
+    -- TODO Phase 2: verify HeadId / TopId / BottomId / ShoesId are valid catalogue IDs
+    -- TODO Phase 2: verify player owns the items in their inventory
 
     return true, nil
 end
 
+--- Copies a flat array of primitives into a new table.
+local function copyArray(t)
+    if not t then return nil end
+    local out = {}
+    for i, v in ipairs(t) do out[i] = v end
+    return out
+end
+
+--- Copies a color sub-table into a new table.
+local function copyColor(c)
+    if not c then return nil end
+    return { r = c.r, g = c.g, b = c.b }
+end
+
+--- Builds a new server-owned outfit table from a validated raw payload.
+--- Prevents mutations (e.g. PAINT_RANDOMIZER) from touching the client's
+--- original table reference and blocks injection of unexpected keys.
+--- @param raw  table  already-validated client payload
+--- @return table
+local function sanitizeOutfit(raw)
+    return {
+        HeadId         = raw.HeadId,
+        TopId          = raw.TopId,
+        BottomId       = raw.BottomId,
+        ShoesId        = raw.ShoesId,
+        AccessoryIds   = copyArray(raw.AccessoryIds),
+        Materials      = copyArray(raw.Materials),
+        StyleTags      = copyArray(raw.StyleTags),
+        ColorPrimary   = copyColor(raw.ColorPrimary),
+        ColorSecondary = copyColor(raw.ColorSecondary),
+    }
+end
+
 --- Applies an active PAINT_RANDOMIZER effect to the outfit, replacing its colours.
 --- Clears the effect from PlayerData after consumption (one-shot use).
+--- outfitData here is already a server-owned sanitized table, safe to mutate.
 --- @param userId     number
---- @param outfitData table  Modified in-place
+--- @param outfitData table  sanitized server-side outfit; modified in-place
 local function applyPaintRandomizer(userId, outfitData)
     local paint = _playerDataManager.GetEffect(userId, "PAINT_RANDOMIZER")
     if not paint then return end
@@ -152,10 +251,14 @@ function OutfitSystem.ValidateAndSetOutfit(player, outfitData)
         return false, matsErr
     end
 
-    -- Server enforces active sabotage effects before storing the outfit
-    applyPaintRandomizer(player.UserId, outfitData)
+    -- Sanitize: copy validated fields into a new server-owned table so that
+    -- subsequent mutations (paint randomizer) never touch the client's data.
+    local outfit = sanitizeOutfit(outfitData)
 
-    local ok = _playerDataManager.SetPlayerData(player.UserId, "CurrentOutfit", outfitData)
+    -- Server enforces active sabotage effects before storing the outfit
+    applyPaintRandomizer(player.UserId, outfit)
+
+    local ok = _playerDataManager.SetPlayerData(player.UserId, "CurrentOutfit", outfit)
     if not ok then
         _logger.error("OutfitSystem",
             "Failed to persist outfit for " .. player.Name .. " – PlayerData not found.")
@@ -163,11 +266,11 @@ function OutfitSystem.ValidateAndSetOutfit(player, outfitData)
     end
 
     -- Consume materials now that the outfit is persisted (no waste on data errors)
-    _materialSystem.ConsumeOutfitMaterials(player, outfitData.Materials)
+    _materialSystem.ConsumeOutfitMaterials(player, outfit.Materials)
 
     -- Analyse the final (post-sabotage) outfit and update the player's Style DNA.
     -- Called after applyPaintRandomizer so DNA reflects server-authoritative colours.
-    _styleDNA.UpdateStyleDNA(player, outfitData)
+    _styleDNA.UpdateStyleDNA(player, outfit)
 
     _logger.info("OutfitSystem", "Outfit accepted for " .. player.Name)
     return true, nil

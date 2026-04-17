@@ -26,7 +26,8 @@
         • SubmitVote    – phase check before forwarding
         • UseSabotage   – phase check before forwarding
         • TriggerAction – phase check (RUNWAY only) before forwarding
-        • StartRound    – only valid from IDLE (RoundManager guards internally)
+        • StartRound    – admin-only gate (see ADMIN_USER_IDS below); IDLE guard is
+                          also enforced by RoundManager internally
 --]]
 
 -- ── Roblox Services ───────────────────────────────────────────────────────────
@@ -60,6 +61,13 @@ local RunwaySystem      = loadModule("RunwaySystem")
 local MaterialSystem    = loadModule("MaterialSystem")
 local ReputationSystem  = loadModule("ReputationSystem")
 local RoundManager      = loadModule("RoundManager")
+
+-- ── Admin authorization ───────────────────────────────────────────────────────
+-- Only UserIds listed here may fire StartRound from a client.
+-- An empty set means no client can trigger a round start remotely; use the
+-- server-side TestScenario or an auto-start loop instead.
+-- Populate with real admin UserId numbers before shipping.
+local ADMIN_USER_IDS = {}  -- e.g. { [12345678] = true, [87654321] = true }
 
 -- ── Remotes ───────────────────────────────────────────────────────────────────
 
@@ -105,11 +113,16 @@ RoundManager.Init({
 Logger.info("GameController", "All systems initialized.")
 
 -- ── Remote: StartRound ────────────────────────────────────────────────────────
--- Client fires this to request a round start (admin gating added in Phase 2).
+-- Restricted to admin UserId(s) in ADMIN_USER_IDS.  Any other client firing
+-- this event is silently rejected to avoid leaking information about the check.
 
 Remotes.StartRound.OnServerEvent:Connect(function(player)
-    Logger.info("GameController", player.Name .. " requested StartRound.")
-    -- TODO Phase 2: verify player is admin or game-mode allows player-initiated rounds
+    if not ADMIN_USER_IDS[player.UserId] then
+        Logger.warn("GameController",
+            player.Name .. " attempted StartRound without authorization – rejected.")
+        return
+    end
+    Logger.info("GameController", player.Name .. " [ADMIN] requested StartRound.")
     RoundManager.StartRound(Players:GetPlayers())
 end)
 
@@ -177,6 +190,21 @@ Remotes.UseSabotage.OnServerEvent:Connect(function(player, sabotageType, targetU
         return
     end
 
+    -- Both initiator and target must be active round participants.
+    -- Checked here rather than inside SabotageSystem to keep the circular-dep
+    -- boundary clean (SabotageSystem is a dep of RoundManager, not vice-versa).
+    if not RoundManager.IsPlayerInActiveRound(player.UserId) then
+        Logger.warn("GameController",
+            player.Name .. " is not an active round participant – sabotage rejected.")
+        return
+    end
+    if not RoundManager.IsPlayerInActiveRound(targetUserId) then
+        Logger.warn("GameController",
+            "Sabotage target UserId " .. tostring(targetUserId)
+            .. " is not an active round participant – rejected.")
+        return
+    end
+
     local ok, err = SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
     if not ok then
         Logger.warn("GameController",
@@ -210,6 +238,9 @@ end)
 Players.PlayerRemoving:Connect(function(player)
     Logger.info("GameController",
         "Player left: " .. player.Name .. " (UserId: " .. player.UserId .. ")")
+    -- Remove from the live round participant set before wiping PlayerData so
+    -- any concurrent sabotage/vote handlers see the player as gone immediately.
+    RoundManager.HandlePlayerLeft(player.UserId)
     PlayerDataManager.RemovePlayerData(player.UserId)
 end)
 

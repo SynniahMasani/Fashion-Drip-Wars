@@ -339,6 +339,7 @@ function ReputationSystem.UpdateReputation(player, roundResult)
     end
 
     -- ── Step 4: recalculate reputation ────────────────────────────────────────
+    local oldScore = data.ReputationScore   -- capture before overwriting
     local newScore = recalcReputation(history)
     data.ReputationScore = newScore
 
@@ -349,8 +350,7 @@ function ReputationSystem.UpdateReputation(player, roundResult)
         roundResult.rank,
         roundResult.totalPlayers,
         roundScore,
-        -- previous score is already overwritten; log new value twice with arrow
-        newScore, newScore,
+        oldScore, newScore,
         resolveTier(newScore),
         abuseDetected and "  ⚠ abuse" or ""))
 end
