@@ -198,14 +198,42 @@ Remotes.UseSabotage.OnServerEvent:Connect(function(player, sabotageType, targetU
             player.Name .. " is not an active round participant – sabotage rejected.")
         return
     end
-    if not RoundManager.IsPlayerInActiveRound(targetUserId) then
+
+    -- Resolve targeting mode from server-side sabotage metadata.
+    -- Do not trust the client to declare whether a sabotage is self-target.
+    local sabotageMeta = SabotageSystem.GetSabotageTypeMeta(sabotageType)
+    if not sabotageMeta then
         Logger.warn("GameController",
-            "Sabotage target UserId " .. tostring(targetUserId)
-            .. " is not an active round participant – rejected.")
+            player.Name .. " attempted unknown sabotage '" .. tostring(sabotageType) .. "' – rejected.")
         return
     end
 
-    local ok, err = SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
+    local resolvedTargetUserId = nil
+    if sabotageMeta.targetMode == "self" then
+        -- Defensive abilities are always self-targeted.
+        if targetUserId ~= nil and tonumber(targetUserId) and tonumber(targetUserId) ~= player.UserId then
+            Logger.warn("GameController",
+                player.Name .. " sent mismatched self-target sabotage payload – rejected.")
+            return
+        end
+        resolvedTargetUserId = player.UserId
+    else
+        -- Offensive abilities must provide a valid active target.
+        resolvedTargetUserId = tonumber(targetUserId)
+        if not resolvedTargetUserId then
+            Logger.warn("GameController",
+                player.Name .. " sent sabotage without a valid targetUserId – rejected.")
+            return
+        end
+        if not RoundManager.IsPlayerInActiveRound(resolvedTargetUserId) then
+            Logger.warn("GameController",
+                "Sabotage target UserId " .. tostring(resolvedTargetUserId)
+                .. " is not an active round participant – rejected.")
+            return
+        end
+    end
+
+    local ok, err = SabotageSystem.ValidateSabotage(player, sabotageType, resolvedTargetUserId)
     if not ok then
         Logger.warn("GameController",
             "Sabotage rejected for " .. player.Name .. ": " .. tostring(err))

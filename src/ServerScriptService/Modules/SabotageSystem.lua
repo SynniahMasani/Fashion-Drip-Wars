@@ -32,6 +32,7 @@
         SabotageSystem.Stop()
         SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId) -> (bool, string|nil)
         SabotageSystem.GetSabotageTypes() -> string[]
+        SabotageSystem.GetSabotageTypeMeta(sabotageType) -> table|nil
 --]]
 
 local SabotageSystem = {}
@@ -40,10 +41,12 @@ local SabotageSystem = {}
 -- Add new types here; the rest of the module stays unchanged.
 
 local SABOTAGE_TYPES = {
-    PAINT_RANDOMIZER = { cooldown = 45,  description = "Randomises the target's outfit colours." },
-    TEMPORARY_STUN   = { cooldown = 60,  description = "Blocks outfit submission for 10 seconds." },
-    STYLE_SCRAMBLE   = { cooldown = 60,  description = "Scrambles outfit style tags. (Phase 2)" },
-    MATERIAL_STEAL   = { cooldown = 90,  description = "Steals a material from inventory. (Phase 2)" },
+    PAINT_RANDOMIZER = { cooldown = 45,  targetMode = "opponent", description = "Randomises the target's outfit colours." },
+    TEMPORARY_STUN   = { cooldown = 60,  targetMode = "opponent", description = "Blocks outfit submission for 10 seconds." },
+    STYLE_SCRAMBLE   = { cooldown = 60,  targetMode = "opponent", description = "Scrambles outfit style tags. (Phase 2)" },
+    MATERIAL_STEAL   = { cooldown = 90,  targetMode = "opponent", description = "Steals a material from inventory. (Phase 2)" },
+    MIRROR_SHIELD    = { cooldown = 45,  targetMode = "self",     description = "Blocks/reflects incoming sabotage. (Phase 2)" },
+    CLEANSE          = { cooldown = 45,  targetMode = "self",     description = "Clears active negative effects. (Phase 2)" },
 }
 
 local STUN_DURATION = 10 -- seconds a stun remains active
@@ -180,8 +183,10 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
         return false, "SabotageSystem is not running."
     end
 
+    local sabotageDef = SABOTAGE_TYPES[sabotageType]
+
     -- Whitelist check
-    if not SABOTAGE_TYPES[sabotageType] then
+    if not sabotageDef then
         _logger.warn("SabotageSystem",
             "Unknown sabotage type '" .. tostring(sabotageType)
             .. "' from " .. player.Name)
@@ -201,9 +206,15 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
         return false, "Target player not found."
     end
 
-    -- No self-targeting
-    if player.UserId == targetUserId then
-        return false, "Cannot sabotage yourself."
+    -- Targeting-mode check (server-authoritative).
+    -- Defensive/self-target sabotage must target the initiator only.
+    -- Offensive sabotage must target a different player.
+    if sabotageDef.targetMode == "self" then
+        if targetUserId ~= player.UserId then
+            return false, "This sabotage must target yourself."
+        end
+    elseif player.UserId == targetUserId then
+        return false, "Cannot target yourself with this sabotage."
     end
 
     -- Cooldown check
@@ -250,6 +261,14 @@ function SabotageSystem.GetSabotageTypes()
     end
     table.sort(list)
     return list
+end
+
+--- Returns sabotage metadata for a type, or nil if unknown.
+--- Shape: { cooldown: number, targetMode: "self"|"opponent", description: string }
+--- @param sabotageType string
+--- @return table|nil
+function SabotageSystem.GetSabotageTypeMeta(sabotageType)
+    return SABOTAGE_TYPES[sabotageType]
 end
 
 return SabotageSystem
