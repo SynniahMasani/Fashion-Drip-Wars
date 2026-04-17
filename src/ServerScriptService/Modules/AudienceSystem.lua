@@ -79,6 +79,8 @@ local INTEREST_LOSS_WEAK   = 5    -- weak outfits accelerate boredom
 
 -- Interest floor — the crowd never completely zones out
 local MIN_INTEREST  = 20
+local MIN_MULTIPLIER = 0.93
+local MAX_MULTIPLIER = 1.10
 
 -- HypeMultiplier tier table (ordered highest first)
 local HYPE_TIERS = {
@@ -155,6 +157,7 @@ end
 --- @param player      Player
 --- @param outfitScore number  0–10
 function AudienceSystem.UpdateAudience(player, outfitScore)
+    outfitScore = clamp(tonumber(outfitScore) or 0, 0, 10)
     local interestMod  = _interestLevel / 100  -- scale [0, 1]
 
     local hypeDelta
@@ -196,10 +199,11 @@ end
 --- @return number  value in [0.93, 1.10]
 function AudienceSystem.GetHypeMultiplier()
     local tier = resolveTier(_hypeLevel)
+    local multiplier = clamp(tier.multiplier, MIN_MULTIPLIER, MAX_MULTIPLIER)
     _logger.info("AudienceSystem", string.format(
         "GetHypeMultiplier → %.2f  (Hype: %d [%s]  Interest: %d)",
-        tier.multiplier, _hypeLevel, tier.label, _interestLevel))
-    return tier.multiplier
+        multiplier, _hypeLevel, tier.label, _interestLevel))
+    return multiplier
 end
 
 --- Returns a snapshot of the current audience state for logging or broadcasting.
@@ -207,10 +211,11 @@ end
 --- @return table
 function AudienceSystem.GetAudienceState()
     local tier = resolveTier(_hypeLevel)
+    local multiplier = clamp(tier.multiplier, MIN_MULTIPLIER, MAX_MULTIPLIER)
     return {
         hypeLevel     = _hypeLevel,
         interestLevel = _interestLevel,
-        multiplier    = tier.multiplier,
+        multiplier    = multiplier,
         label         = tier.label,
     }
 end

@@ -149,8 +149,8 @@ local JUDGES = {
 
 -- ── Constants ────────────────────────────────────────────────────────────────
 
-local BASE_MIN    = 4.5   -- random score floor before bias adjustments
-local BASE_MAX    = 7.5   -- random score ceiling before bias adjustments
+local BASE_SCORE  = 6.0   -- deterministic neutral baseline before adjustments
+local BASE_JITTER = 0.6   -- deterministic per-player/judge variation (±)
 local BIAS_SCALE  = 2.5   -- maximum points a bias swing can add or subtract
 local QUALITY_MAX = 0.50  -- maximum outfit-completeness bonus (style-neutral)
 local MIN_JUDGES  = 2
@@ -173,6 +173,25 @@ local function shuffle(t)
         local j  = math.random(1, i)
         t[i], t[j] = t[j], t[i]
     end
+end
+
+local function clamp(v, lo, hi)
+    return math.max(lo, math.min(hi, v))
+end
+
+local function round1(v)
+    return math.floor(v * 10 + 0.5) / 10
+end
+
+--- Deterministic pseudo-random in [0, 1) from a string key.
+--- Avoids global RNG coupling so equal inputs always score equally.
+local function unitFromKey(key)
+    local h = 2166136261
+    for i = 1, #key do
+        h = bit32.bxor(h, string.byte(key, i))
+        h = (h * 16777619) % 4294967296
+    end
+    return (h % 1000000) / 1000000
 end
 
 --- Returns how many of the four clothing slots (Head/Top/Bottom/Shoes) are filled.
@@ -203,8 +222,9 @@ end
 --- @param styleWeight  { [string]: number }
 --- @param outfitData   table
 --- @return number  raw (unclamped) judge score
-local function scoreThroughJudge(judge, styleWeight, outfitData)
-    local baseScore = BASE_MIN + math.random() * (BASE_MAX - BASE_MIN)
+local function scoreThroughJudge(judge, styleWeight, outfitData, stableKey)
+    local jitterUnit = unitFromKey(stableKey) -- [0,1)
+    local baseScore = BASE_SCORE + ((jitterUnit * 2) - 1) * BASE_JITTER
 
     -- Style-neutral quality signal
     local qualityBonus = outfitCompleteness(outfitData)
@@ -223,7 +243,7 @@ local function scoreThroughJudge(judge, styleWeight, outfitData)
     -- scaled so the total swing fits the 1-10 axis.
     local styleNet = (styleMatch - styleMismatch) * judge.BiasStrength * BIAS_SCALE
 
-    return baseScore + qualityBonus + styleNet
+    return clamp(baseScore + qualityBonus + styleNet, 1.0, 10.0)
 end
 
 -- ── Public API ───────────────────────────────────────────────────────────────
@@ -322,16 +342,20 @@ function JudgeSystem.ScoreOutfit(player, outfitData)
             "ScoreOutfit called before SelectJudgesForRound – scoring with full catalogue.")
     end
 
+    local theme = _themeSystem.GetCurrentTheme()
     local judgeScores = {}
     for _, judge in ipairs(panel) do
-        local raw     = scoreThroughJudge(judge, styleWeight, outfitData)
-        local clamped = math.max(1.0, math.min(10.0, raw))
-        clamped = math.floor(clamped * 10 + 0.5) / 10
-        table.insert(judgeScores, clamped)
+        local stableKey = table.concat({
+            tostring(player.UserId),
+            judge.name,
+            theme and theme.name or "NoTheme",
+        }, "|")
+        local judgeScore = round1(scoreThroughJudge(judge, styleWeight, outfitData, stableKey))
+        table.insert(judgeScores, judgeScore)
 
         _logger.info("JudgeSystem", string.format(
             "  %-12s → %.1f  (%s | DNA: %s)",
-            judge.name, clamped, player.Name,
+            judge.name, judgeScore, player.Name,
             styleProfile and styleProfile.DominantStyle or "None"))
     end
 
@@ -363,8 +387,7 @@ function JudgeSystem.ScoreOutfit(player, outfitData)
     end
     -- ─────────────────────────────────────────────────────────────────────────
 
-    local finalScore = math.max(1.0, math.min(10.0, panelAvg + matBonus + metaMod))
-    finalScore = math.floor(finalScore * 10 + 0.5) / 10
+    local finalScore = round1(clamp(panelAvg + matBonus + metaMod, 1.0, 10.0))
 
     _logger.info("JudgeSystem", string.format(
         "%s  panel avg: %.1f  mat: %+.2f  meta: %+.2f  →  AI score: %.1f",

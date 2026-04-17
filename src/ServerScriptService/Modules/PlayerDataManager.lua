@@ -71,6 +71,32 @@ local function newPlayerData(userId)
     }
 end
 
+local function normalizePlayerDataShape(data, userId)
+    if not data then return nil end
+    data.UserId = data.UserId or userId
+    data.StyleDNA = data.StyleDNA or {
+        StyleScores = {
+            Streetwear   = 0,
+            Luxury       = 0,
+            Casual       = 0,
+            Experimental = 0,
+        },
+        DominantStyle  = "None",
+        RoundsAnalyzed = 0,
+    }
+    data.StyleDNA.StyleScores = data.StyleDNA.StyleScores or {}
+    for _, cat in ipairs({ "Streetwear", "Luxury", "Casual", "Experimental" }) do
+        data.StyleDNA.StyleScores[cat] = data.StyleDNA.StyleScores[cat] or 0
+    end
+    data.StyleDNA.DominantStyle  = data.StyleDNA.DominantStyle or "None"
+    data.StyleDNA.RoundsAnalyzed = data.StyleDNA.RoundsAnalyzed or 0
+    data.MaterialsInventory = data.MaterialsInventory or {}
+    data.ReputationScore    = data.ReputationScore or 0
+    data.MatchHistory       = data.MatchHistory or {}
+    data.ActiveEffects      = data.ActiveEffects or {}
+    return data
+end
+
 -- ── Public API ───────────────────────────────────────────────────────────────
 
 --- Initialises the module. Must be called before any other function.
@@ -102,7 +128,7 @@ end
 --- @param userId  number
 --- @return PlayerData | nil
 function PlayerDataManager.GetPlayerData(userId)
-    return _store[userId]
+    return normalizePlayerDataShape(_store[userId], userId)
 end
 
 --- Sets a top-level field on a player's PlayerData record.
