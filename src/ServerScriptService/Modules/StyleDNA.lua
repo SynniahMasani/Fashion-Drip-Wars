@@ -144,6 +144,32 @@ local LABELS = {
 local _playerDataManager = nil
 local _logger            = nil
 
+local EMPTY_STYLE_PROFILE = {
+    StyleScores = {
+        Streetwear   = 0,
+        Luxury       = 0,
+        Casual       = 0,
+        Experimental = 0,
+    },
+    DominantStyle  = "None",
+    Label          = "Style Seeker",
+    RoundsAnalyzed = 0,
+}
+
+local function copyEmptyProfile()
+    return {
+        StyleScores = {
+            Streetwear   = EMPTY_STYLE_PROFILE.StyleScores.Streetwear,
+            Luxury       = EMPTY_STYLE_PROFILE.StyleScores.Luxury,
+            Casual       = EMPTY_STYLE_PROFILE.StyleScores.Casual,
+            Experimental = EMPTY_STYLE_PROFILE.StyleScores.Experimental,
+        },
+        DominantStyle  = EMPTY_STYLE_PROFILE.DominantStyle,
+        Label          = EMPTY_STYLE_PROFILE.Label,
+        RoundsAnalyzed = EMPTY_STYLE_PROFILE.RoundsAnalyzed,
+    }
+end
+
 -- ── Analysis helpers ──────────────────────────────────────────────────────────
 
 --- Derives style points from a single {r, g, b} colour (all components 0..1).
@@ -284,6 +310,30 @@ local function resolveLabel(dominantStyle, topScore)
     return tiers[#tiers].label  -- fallback to lowest tier
 end
 
+local function resolveProfile(userId)
+    local data = _playerDataManager.GetPlayerData(userId)
+    if not data or not data.StyleDNA then
+        return nil, copyEmptyProfile()
+    end
+
+    local dna      = data.StyleDNA
+    local dominant = dna.DominantStyle or "None"
+    local topScore = (dominant ~= "None" and dominant ~= "Mixed")
+        and (dna.StyleScores[dominant] or 0) or 0
+
+    return data, {
+        StyleScores = {
+            Streetwear   = dna.StyleScores.Streetwear or 0,
+            Luxury       = dna.StyleScores.Luxury or 0,
+            Casual       = dna.StyleScores.Casual or 0,
+            Experimental = dna.StyleScores.Experimental or 0,
+        },
+        DominantStyle  = dominant,
+        Label          = resolveLabel(dominant, topScore),
+        RoundsAnalyzed = dna.RoundsAnalyzed or 0,
+    }
+end
+
 -- ── Public API ───────────────────────────────────────────────────────────────
 
 --- Initialises the module.
@@ -366,47 +416,31 @@ end
 --- @param userId  number
 --- @return string
 function StyleDNA.GetStyleLabel(userId)
-    local data = _playerDataManager.GetPlayerData(userId)
-    if not data then return "Style Seeker" end
-
-    local dna      = data.StyleDNA
-    local dominant = dna.DominantStyle
-    local topScore = 0
-
-    if dominant ~= "None" and dominant ~= "Mixed" then
-        topScore = dna.StyleScores[dominant] or 0
-    end
-
-    return resolveLabel(dominant, topScore)
+    local _, profile = resolveProfile(userId)
+    return profile.Label
 end
 
 --- Returns a full StyleProfile table ready for UI consumption or DataStore save.
---- @param player  Player
+--- Accepts Player or userId for robust profile queries even when player object
+--- is unavailable (e.g. post-leave server profile lookups).
+--- @param playerOrUserId  Player|number
 --- @return StyleProfile | nil
-function StyleDNA.GetPlayerStyle(player)
-    local data = _playerDataManager.GetPlayerData(player.UserId)
-    if not data then
-        _logger.warn("StyleDNA",
-            "GetPlayerStyle: no PlayerData for " .. player.Name)
-        return nil
+function StyleDNA.GetPlayerStyle(playerOrUserId)
+    local userId = type(playerOrUserId) == "number"
+        and playerOrUserId
+        or (playerOrUserId and playerOrUserId.UserId)
+    if not userId then
+        _logger.warn("StyleDNA", "GetPlayerStyle: invalid player/userId argument.")
+        return copyEmptyProfile()
     end
 
-    local dna     = data.StyleDNA
-    local dominant = dna.DominantStyle
-    local topScore = (dominant ~= "None" and dominant ~= "Mixed")
-        and (dna.StyleScores[dominant] or 0) or 0
-
-    return {
-        StyleScores    = {
-            Streetwear   = dna.StyleScores.Streetwear,
-            Luxury       = dna.StyleScores.Luxury,
-            Casual       = dna.StyleScores.Casual,
-            Experimental = dna.StyleScores.Experimental,
-        },
-        DominantStyle  = dominant,
-        Label          = resolveLabel(dominant, topScore),
-        RoundsAnalyzed = dna.RoundsAnalyzed,
-    }
+    local data, profile = resolveProfile(userId)
+    if not data then
+        _logger.info("StyleDNA",
+            "GetPlayerStyle: no PlayerData for UserId " .. tostring(userId)
+            .. " – returning empty profile.")
+    end
+    return profile
 end
 
 return StyleDNA

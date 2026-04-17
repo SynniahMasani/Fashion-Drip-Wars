@@ -103,6 +103,25 @@ local TIERS = {
 local _playerDataManager = nil
 local _logger            = nil
 
+local function cloneHistory(history)
+    local out = {}
+    for i, item in ipairs(history or {}) do
+        out[i] = {
+            roundNumber   = item.roundNumber,
+            rank          = item.rank,
+            totalPlayers  = item.totalPlayers,
+            finalScore    = item.finalScore,
+            playerVote    = item.playerVote,
+            trimmedVote   = item.trimmedVote,
+            aiScore       = item.aiScore,
+            roundScore    = item.roundScore,
+            abuseDetected = item.abuseDetected,
+            timestamp     = item.timestamp,
+        }
+    end
+    return out
+end
+
 -- ── Math helpers ─────────────────────────────────────────────────────────────
 
 local function round1dp(n)
@@ -356,22 +375,41 @@ function ReputationSystem.UpdateReputation(player, roundResult)
 end
 
 --- Returns the reputation profile for a player.
---- Returns nil if no PlayerData record exists.
---- @param player  Player
---- @return ReputationProfile | nil
-function ReputationSystem.GetReputation(player)
-    local data = _playerDataManager.GetPlayerData(player.UserId)
-    if not data then
-        _logger.warn("ReputationSystem",
-            "GetReputation: no PlayerData for " .. player.Name)
-        return nil
+--- Accepts either Player or userId to keep profile queries resilient when
+--- a player object is not available (e.g. after leave or low-history lookup).
+--- Returns a safe default profile when no session data exists.
+--- @param playerOrUserId Player|number
+--- @return ReputationProfile
+function ReputationSystem.GetReputation(playerOrUserId)
+    local userId = type(playerOrUserId) == "number"
+        and playerOrUserId
+        or (playerOrUserId and playerOrUserId.UserId)
+    if not userId then
+        _logger.warn("ReputationSystem", "GetReputation: invalid player/userId argument.")
+        return {
+            score        = 0,
+            tier         = resolveTier(0),
+            matchHistory = {},
+        }
     end
 
-    local score = data.ReputationScore
+    local data = _playerDataManager.GetPlayerData(userId)
+    if not data then
+        _logger.info("ReputationSystem",
+            "GetReputation: no PlayerData for UserId " .. tostring(userId)
+            .. " – returning default profile.")
+        return {
+            score        = 0,
+            tier         = resolveTier(0),
+            matchHistory = {},
+        }
+    end
+
+    local score = tonumber(data.ReputationScore) or 0
     return {
         score        = score,
         tier         = resolveTier(score),
-        matchHistory = data.MatchHistory,
+        matchHistory = cloneHistory(data.MatchHistory),
     }
 end
 
