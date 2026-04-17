@@ -3,37 +3,27 @@
     ──────────────
     Validates and applies sabotage actions sent by clients.
 
-    ── Sabotage types ────────────────────────────────────────────────────────────
-    ┌─────────────────────┬──────────────────────────────────────────────────────┐
-    │ OFFENSIVE                                                                  │
-    ├─────────────────────┬──────────────────────────────────────────────────────┤
-    │ PAINT_RANDOMIZER    │ Overwrites target colours on their next submission.  │
-    │ TEMPORARY_STUN      │ Blocks outfit submission for STUN_DURATION seconds.  │
-    │ STYLE_SCRAMBLE      │ Replaces target's StyleTags with 1-2 random valid   │
-    │                     │ StyleDNA tags on their next submission.              │
-    │ OUTFIT_CURSE        │ Silently removes one random filled slot on the       │
-    │                     │ target's next submission.                            │
-    ├─────────────────────┬──────────────────────────────────────────────────────┤
-    │ DEFENSIVE (self-target only)                                               │
-    ├─────────────────────┬──────────────────────────────────────────────────────┤
-    │ MIRROR_SHIELD       │ Next incoming offensive sabotage is intercepted.     │
-    │                     │ Attacker's cooldown is consumed; their per-round     │
-    │                     │ charge is refunded (intercept ≠ full block).        │
-    │ CLEANSE             │ Removes all active offensive effects immediately.    │
-    └─────────────────────┴──────────────────────────────────────────────────────┘
+    Implemented effects:
+    ┌─────────────────────┬────────────────────────────────────────────────────┐
+    │ PAINT_RANDOMIZER    │ Overwrites the target's outfit colours with random │
+    │                     │ values stored in PlayerData.ActiveEffects. Applied │
+    │                     │ by OutfitSystem the next time the target submits.  │
+    ├─────────────────────┼────────────────────────────────────────────────────┤
+    │ TEMPORARY_STUN      │ Blocks the target's outfit submissions for         │
+    │                     │ STUN_DURATION seconds. GameController enforces     │
+    │                     │ the block by reading PlayerData.ActiveEffects.     │
+    └─────────────────────┴────────────────────────────────────────────────────┘
 
-    Effects fire SabotageApplied to the TARGET's client for UI feedback.
-    MIRROR_SHIELD fires ShieldTriggered to the shielded player's client.
+    Both effects fire SabotageApplied to the TARGET's client so their UI can
+    show the visual feedback (colour flicker, stun animation, etc.).
 
-    ── Frustration controls ─────────────────────────────────────────────────────
-    • Per-type cooldown: enforced per initiator per sabotage type.
-    • maxPerRound cap: each type can only be used once per round per player.
-    • MAX_CONCURRENT_EFFECTS: a target cannot have more than this many active
-      offensive effects at once (stacking limit).
-    • IMMUNITY_WINDOW: after a successful offensive sabotage, the same type
-      cannot be applied to the same target again for this many seconds.
+    Stub effects (structure only, no gameplay yet):
+        STYLE_SCRAMBLE, MATERIAL_STEAL
 
-    ── Dependencies (injected via Init) ─────────────────────────────────────────
+    All effects are per-type cooldown + per-round use-cap tracked. The
+    SABOTAGE_TYPES table drives validation and metadata lookup.
+
+    Dependencies (injected via Init):
         PlayerDataManager, Logger, Remotes, PlayersService
 
     ── Public API ────────────────────────────────────────────────────────────────
@@ -51,25 +41,17 @@ local SabotageSystem = {}
 -- Add new types here; the rest of the module stays unchanged.
 
 local SABOTAGE_TYPES = {
-    PAINT_RANDOMIZER = { cooldown = 45,  targetMode = "opponent", description = "Randomises the target's outfit colours." },
-    TEMPORARY_STUN   = { cooldown = 60,  targetMode = "opponent", description = "Blocks outfit submission for 10 seconds." },
-    STYLE_SCRAMBLE   = { cooldown = 60,  targetMode = "opponent", description = "Scrambles outfit style tags. (Phase 2)" },
-    MATERIAL_STEAL   = { cooldown = 90,  targetMode = "opponent", description = "Steals a material from inventory. (Phase 2)" },
-    MIRROR_SHIELD    = { cooldown = 45,  targetMode = "self",     description = "Blocks/reflects incoming sabotage. (Phase 2)" },
-    CLEANSE          = { cooldown = 45,  targetMode = "self",     description = "Clears active negative effects. (Phase 2)" },
+    PAINT_RANDOMIZER = { cooldown = 45, maxPerRound = 2, category = "offensive", targetMode = "opponent", description = "Randomises the target's outfit colours." },
+    TEMPORARY_STUN   = { cooldown = 60, maxPerRound = 2, category = "offensive", targetMode = "opponent", description = "Blocks outfit submission for 10 seconds." },
+    STYLE_SCRAMBLE   = { cooldown = 60, maxPerRound = 1, category = "offensive", targetMode = "opponent", description = "Scrambles outfit style tags. (Phase 2)" },
+    MATERIAL_STEAL   = { cooldown = 90, maxPerRound = 1, category = "offensive", targetMode = "opponent", description = "Steals a material from inventory. (Phase 2)" },
+    MIRROR_SHIELD    = { cooldown = 45, maxPerRound = 2, category = "defensive", targetMode = "self",     description = "Blocks/reflects incoming sabotage." },
+    CLEANSE          = { cooldown = 45, maxPerRound = 2, category = "defensive", targetMode = "self",     description = "Clears active negative effects + grants short immunity." },
 }
 
--- Canonical list of offensive effect keys used for stacking limits and CLEANSE.
-local OFFENSIVE_EFFECT_KEYS = {
-    "PAINT_RANDOMIZER",
-    "TEMPORARY_STUN",
-    "STYLE_SCRAMBLE",
-    "OUTFIT_CURSE",
-}
-
-local STUN_DURATION          = 10   -- seconds a TEMPORARY_STUN blocks submissions
-local MAX_CONCURRENT_EFFECTS = 2    -- max simultaneous offensive effects on one target
-local IMMUNITY_WINDOW        = 45   -- seconds before the same type can be re-applied to the same target
+local STUN_DURATION = 10 -- seconds a stun remains active
+local MIRROR_SHIELD_DURATION = 25
+local IMMUNITY_DURATION = 8
 
 -- ── Private state ────────────────────────────────────────────────────────────
 
@@ -81,6 +63,9 @@ local _isRunning         = false
 
 -- { [userId]: { [sabotageType]: lastUsedClock } }
 local _cooldowns = {}
+--- Per-player, per-type count in the current round.
+--- { [userId: number]: { [sabotageType: string]: number } }
+local _roundUses = {}
 
 -- { [userId]: { [sabotageType]: usesThisRound } }  reset in Stop()
 local _roundUses = {}
@@ -99,15 +84,17 @@ local function cooldownRemaining(userId, sabotageType)
     return math.max(0, cd - (os.clock() - lastUsed))
 end
 
-local function roundUsesRemaining(userId, sabotageType)
-    local typeInfo = SABOTAGE_TYPES[sabotageType]
-    local uses = (_roundUses[userId] or {})[sabotageType] or 0
-    return math.max(0, typeInfo.maxPerRound - uses)
+local function roundUsesRemaining(userId, sabotageType, sabotageDef)
+    local perType = _roundUses[userId]
+    local used = perType and perType[sabotageType] or 0
+    return math.max(0, sabotageDef.maxPerRound - used)
 end
 
-local function recordCooldown(userId, sabotageType)
+local function recordUsage(userId, sabotageType)
     if not _cooldowns[userId] then _cooldowns[userId] = {} end
     _cooldowns[userId][sabotageType] = os.clock()
+    if not _roundUses[userId] then _roundUses[userId] = {} end
+    _roundUses[userId][sabotageType] = (_roundUses[userId][sabotageType] or 0) + 1
 end
 
 local function recordRoundUse(userId, sabotageType)
@@ -219,44 +206,36 @@ local function applyTemporaryStun(player, targetUserId)
         .. " for " .. STUN_DURATION .. "s")
 end
 
-local function applyStyleScramble(player, targetUserId)
-    -- Store a sentinel; OutfitSystem resolves the actual tag replacement on submission.
-    _playerDataManager.SetEffect(targetUserId, "STYLE_SCRAMBLE", { pending = true })
-
-    local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
-    if targetPlayer then
-        _remotes.SabotageApplied:FireClient(targetPlayer, "STYLE_SCRAMBLE", {})
-    end
-
+local function applyMirrorShield(player, targetUserId)
+    local expiresAt = os.clock() + MIRROR_SHIELD_DURATION
+    _playerDataManager.SetEffect(targetUserId, "MIRROR_SHIELD", {
+        expiresAt = expiresAt,
+    })
+    _remotes.SabotageApplied:FireClient(player, "MIRROR_SHIELD", {
+        duration = MIRROR_SHIELD_DURATION,
+    })
     _logger.info("SabotageSystem",
-        player.Name .. " used STYLE_SCRAMBLE on UserId " .. tostring(targetUserId))
+        player.Name .. " activated MIRROR_SHIELD for " .. MIRROR_SHIELD_DURATION .. "s")
 end
 
-local function applyOutfitCurse(player, targetUserId)
-    -- Store a sentinel; OutfitSystem removes a random slot on submission.
-    _playerDataManager.SetEffect(targetUserId, "OUTFIT_CURSE", { pending = true })
-
-    local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
-    if targetPlayer then
-        _remotes.SabotageApplied:FireClient(targetPlayer, "OUTFIT_CURSE", {})
+local function applyCleanse(player, targetUserId)
+    local cleared = {}
+    for _, effectName in ipairs({ "TEMPORARY_STUN", "PAINT_RANDOMIZER", "STYLE_SCRAMBLE" }) do
+        if _playerDataManager.GetEffect(targetUserId, effectName) then
+            _playerDataManager.ClearEffect(targetUserId, effectName)
+            table.insert(cleared, effectName)
+        end
     end
-
+    _playerDataManager.SetEffect(targetUserId, "IMMUNITY_WINDOW", {
+        expiresAt = os.clock() + IMMUNITY_DURATION,
+    })
+    _remotes.SabotageApplied:FireClient(player, "CLEANSE", {
+        removedEffects = cleared,
+        immunityDuration = IMMUNITY_DURATION,
+    })
     _logger.info("SabotageSystem",
-        player.Name .. " used OUTFIT_CURSE on UserId " .. tostring(targetUserId))
-end
-
-local function applyMirrorShield(player)
-    _playerDataManager.SetEffect(player.UserId, "MIRROR_SHIELD", { active = true })
-    _logger.info("SabotageSystem",
-        player.Name .. " activated MIRROR_SHIELD.")
-end
-
-local function applyCleanse(player)
-    for _, effectKey in ipairs(OFFENSIVE_EFFECT_KEYS) do
-        _playerDataManager.ClearEffect(player.UserId, effectKey)
-    end
-    _logger.info("SabotageSystem",
-        player.Name .. " used CLEANSE – all offensive effects removed.")
+        player.Name .. " used CLEANSE (cleared: " .. (#cleared > 0 and table.concat(cleared, ", ") or "none")
+        .. ", immunity: " .. IMMUNITY_DURATION .. "s)")
 end
 
 --- Dispatches to the correct effect implementation.
@@ -265,14 +244,10 @@ local function applyEffect(player, sabotageType, targetUserId)
         applyPaintRandomizer(player, targetUserId)
     elseif sabotageType == "TEMPORARY_STUN" then
         applyTemporaryStun(player, targetUserId)
-    elseif sabotageType == "STYLE_SCRAMBLE" then
-        applyStyleScramble(player, targetUserId)
-    elseif sabotageType == "OUTFIT_CURSE" then
-        applyOutfitCurse(player, targetUserId)
     elseif sabotageType == "MIRROR_SHIELD" then
-        applyMirrorShield(player)
+        applyMirrorShield(player, targetUserId)
     elseif sabotageType == "CLEANSE" then
-        applyCleanse(player)
+        applyCleanse(player, targetUserId)
     else
         -- Phase 3 stub
         _logger.info("SabotageSystem",
@@ -304,10 +279,9 @@ end
 
 --- Disarms the system and clears all per-round tracking tables.
 function SabotageSystem.Stop()
-    _cooldowns      = {}
-    _roundUses      = {}
-    _targetImmunity = {}
-    _isRunning      = false
+    _cooldowns = {}
+    _roundUses = {}
+    _isRunning = false
     _logger.info("SabotageSystem", "Stopped.")
 end
 
@@ -340,7 +314,12 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
         return false, "PlayerData not found for initiator."
     end
 
-    -- Target must have a PlayerData record (still in the game)
+    targetUserId = tonumber(targetUserId)
+    if not targetUserId then
+        return false, "Invalid target userId."
+    end
+
+    -- Target must have a PlayerData record (i.e. still in the game)
     if not _playerDataManager.GetPlayerData(targetUserId) then
         _logger.warn("SabotageSystem",
             "Sabotage target UserId " .. tostring(targetUserId) .. " not found.")
@@ -357,8 +336,12 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
     elseif player.UserId == targetUserId then
         return false, "Cannot target yourself with this sabotage."
     end
-    if typeInfo.selfTarget and player.UserId ~= targetUserId then
-        return false, "This ability can only target yourself."
+
+    local usesRemaining = roundUsesRemaining(player.UserId, sabotageType, sabotageDef)
+    if usesRemaining <= 0 then
+        _logger.warn("SabotageSystem",
+            player.Name .. " reached per-round cap for " .. sabotageType)
+        return false, "No uses remaining for this sabotage this round."
     end
 
     -- Cooldown check
@@ -370,47 +353,58 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
         return false, string.format("Sabotage on cooldown (%.0fs remaining).", remaining)
     end
 
-    -- Per-round use cap
-    if roundUsesRemaining(player.UserId, sabotageType) <= 0 then
-        _logger.warn("SabotageSystem",
-            player.Name .. " has exhausted " .. sabotageType .. " uses for this round.")
-        return false, "You have already used this ability this round."
+    local effectiveTargetUserId = targetUserId
+
+    -- Defensive intercept: active mirror shield reflects offensive sabotage.
+    if sabotageDef.category == "offensive" then
+        local shield = _playerDataManager.GetEffect(targetUserId, "MIRROR_SHIELD")
+        if shield and shield.expiresAt and os.clock() < shield.expiresAt then
+            _playerDataManager.ClearEffect(targetUserId, "MIRROR_SHIELD")
+            effectiveTargetUserId = player.UserId
+            _logger.info("SabotageSystem",
+                "MIRROR_SHIELD intercepted " .. sabotageType
+                .. " from " .. player.Name .. " and reflected it.")
+        end
+
+        local immunity = _playerDataManager.GetEffect(effectiveTargetUserId, "IMMUNITY_WINDOW")
+        if immunity and immunity.expiresAt and os.clock() < immunity.expiresAt then
+            return false, "Target is temporarily immune to sabotage."
+        end
+    elseif sabotageType == "MIRROR_SHIELD" then
+        local existing = _playerDataManager.GetEffect(targetUserId, "MIRROR_SHIELD")
+        if existing and existing.expiresAt and os.clock() < existing.expiresAt then
+            return false, "Mirror Shield is already active."
+        end
+    elseif sabotageType == "CLEANSE" then
+        local immunity = _playerDataManager.GetEffect(targetUserId, "IMMUNITY_WINDOW")
+        if immunity and immunity.expiresAt and os.clock() < immunity.expiresAt then
+            return false, "Cleanse immunity is already active."
+        end
     end
 
-    -- ── Offensive-only checks ────────────────────────────────────────────────
-    if typeInfo.category == "OFFENSIVE" then
-
-        -- MIRROR_SHIELD intercept: attacker's cooldown IS consumed but not round charge
-        if checkMirrorShield(player, targetUserId, sabotageType) then
-            recordCooldown(player.UserId, sabotageType)
-            -- round charge NOT consumed — attacker can retry after cooldown expires
-            return true, nil
-        end
-
-        -- Immunity window: same type cannot hit the same target twice quickly
-        if isImmune(targetUserId, sabotageType) then
+    -- Redundant active-effect check: reject if the same effect is already pending
+    -- on the target to prevent wasted slots and confusing UI states.
+    if sabotageType == "TEMPORARY_STUN" and sabotageDef.category == "offensive" then
+        local existing = _playerDataManager.GetEffect(effectiveTargetUserId, "TEMPORARY_STUN")
+        if existing and os.clock() < existing.expiresAt then
             _logger.warn("SabotageSystem",
-                "UserId " .. tostring(targetUserId)
-                .. " is immune to " .. sabotageType .. " (immunity window active).")
-            return false, "Target is currently immune to that ability."
+                "TEMPORARY_STUN already active on UserId "
+                .. tostring(effectiveTargetUserId) .. " – rejected.")
+            return false, "Target is already stunned."
         end
-
-        -- Stacking limit: cap concurrent offensive effects on a single target
-        if countActiveOffensiveEffects(targetUserId) >= MAX_CONCURRENT_EFFECTS then
+    elseif sabotageType == "PAINT_RANDOMIZER" and sabotageDef.category == "offensive" then
+        local existing = _playerDataManager.GetEffect(effectiveTargetUserId, "PAINT_RANDOMIZER")
+        if existing then
             _logger.warn("SabotageSystem",
-                "UserId " .. tostring(targetUserId)
-                .. " already has " .. MAX_CONCURRENT_EFFECTS .. " active effects – stacking rejected.")
-            return false, "Target already has too many active effects."
+                "PAINT_RANDOMIZER already pending on UserId "
+                .. tostring(effectiveTargetUserId) .. " – rejected.")
+            return false, "Target already has a pending paint effect."
         end
     end
 
     -- All checks passed – commit
-    recordCooldown(player.UserId, sabotageType)
-    recordRoundUse(player.UserId, sabotageType)
-    if typeInfo.category == "OFFENSIVE" then
-        recordImmunity(targetUserId, sabotageType)
-    end
-    applyEffect(player, sabotageType, targetUserId)
+    recordUsage(player.UserId, sabotageType)
+    applyEffect(player, sabotageType, effectiveTargetUserId)
     return true, nil
 end
 
@@ -426,7 +420,7 @@ function SabotageSystem.GetSabotageTypes()
 end
 
 --- Returns sabotage metadata for a type, or nil if unknown.
---- Shape: { cooldown: number, targetMode: "self"|"opponent", description: string }
+--- Shape: { cooldown, maxPerRound, category, targetMode, description }
 --- @param sabotageType string
 --- @return table|nil
 function SabotageSystem.GetSabotageTypeMeta(sabotageType)
