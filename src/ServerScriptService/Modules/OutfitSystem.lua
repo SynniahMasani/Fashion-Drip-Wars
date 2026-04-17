@@ -43,6 +43,9 @@ local MAX_ACCESSORIES = 5
 local MAX_MATERIALS   = 3   -- must match MaterialSystem.MAX_MATERIALS_PER_OUTFIT
 local MAX_STYLE_TAGS  = 10
 
+-- Valid StyleDNA tags; must stay in sync with StyleDNA module's score keys.
+local STYLE_SCRAMBLE_POOL = { "Streetwear", "Luxury", "Casual", "Experimental" }
+
 -- ── Private state ────────────────────────────────────────────────────────────
 
 local _playerDataManager = nil
@@ -198,6 +201,62 @@ local function applyPaintRandomizer(userId, outfitData)
         .. " – colours overridden.")
 end
 
+--- Applies an active STYLE_SCRAMBLE effect: replaces the outfit's StyleTags with
+--- 1–2 randomly picked tags from STYLE_SCRAMBLE_POOL (Fisher-Yates partial shuffle).
+--- Only valid StyleDNA tags are used so the effect is meaningful, not a free buff.
+--- @param userId     number
+--- @param outfitData table  sanitized server-side outfit; modified in-place
+local function applyStyleScramble(userId, outfitData)
+    local effect = _playerDataManager.GetEffect(userId, "STYLE_SCRAMBLE")
+    if not effect then return end
+
+    local count = math.random(1, 2)
+    local pool  = { table.unpack(STYLE_SCRAMBLE_POOL) }
+    local scrambled = {}
+    for i = 1, count do
+        local j = math.random(i, #pool)
+        pool[i], pool[j] = pool[j], pool[i]
+        scrambled[i] = pool[i]
+    end
+
+    outfitData.StyleTags = scrambled
+    _playerDataManager.ClearEffect(userId, "STYLE_SCRAMBLE")
+
+    _logger.info("OutfitSystem",
+        "STYLE_SCRAMBLE consumed for UserId " .. tostring(userId)
+        .. " – tags forced to: " .. table.concat(scrambled, ", "))
+end
+
+--- Applies an active OUTFIT_CURSE effect: removes one random filled slot.
+--- Falls back gracefully when no slots are filled (empty outfit edge case).
+--- @param userId     number
+--- @param outfitData table  sanitized server-side outfit; modified in-place
+local function applyOutfitCurse(userId, outfitData)
+    local effect = _playerDataManager.GetEffect(userId, "OUTFIT_CURSE")
+    if not effect then return end
+
+    local filled = {}
+    for _, slot in ipairs({ "HeadId", "TopId", "BottomId", "ShoesId" }) do
+        if outfitData[slot] then
+            table.insert(filled, slot)
+        end
+    end
+
+    if #filled > 0 then
+        local removed = filled[math.random(#filled)]
+        outfitData[removed] = nil
+        _logger.info("OutfitSystem",
+            "OUTFIT_CURSE resolved for UserId " .. tostring(userId)
+            .. " – slot removed: " .. removed)
+    else
+        _logger.info("OutfitSystem",
+            "OUTFIT_CURSE resolved for UserId " .. tostring(userId)
+            .. " – no filled slots to remove.")
+    end
+
+    _playerDataManager.ClearEffect(userId, "OUTFIT_CURSE")
+end
+
 -- ── Public API ───────────────────────────────────────────────────────────────
 
 --- Initialises the module.
@@ -255,8 +314,12 @@ function OutfitSystem.ValidateAndSetOutfit(player, outfitData)
     -- subsequent mutations (paint randomizer) never touch the client's data.
     local outfit = sanitizeOutfit(outfitData)
 
-    -- Server enforces active sabotage effects before storing the outfit
+    -- Server enforces active sabotage effects before storing the outfit.
+    -- Order matters: PAINT_RANDOMIZER first (colours), then STYLE_SCRAMBLE
+    -- (tags), then OUTFIT_CURSE (slot removal) — all on the sanitized table.
     applyPaintRandomizer(player.UserId, outfit)
+    applyStyleScramble(player.UserId, outfit)
+    applyOutfitCurse(player.UserId, outfit)
 
     local ok = _playerDataManager.SetPlayerData(player.UserId, "CurrentOutfit", outfit)
     if not ok then

@@ -26,7 +26,7 @@
     Dependencies (injected via Init):
         PlayerDataManager, Logger, Remotes, PlayersService
 
-    Public API:
+    ── Public API ────────────────────────────────────────────────────────────────
         SabotageSystem.Init(playerDataManager, logger, remotes, playersService)
         SabotageSystem.Start()
         SabotageSystem.Stop()
@@ -61,12 +61,17 @@ local _remotes           = nil
 local _playersService    = nil
 local _isRunning         = false
 
---- Per-player, per-type cooldown timestamps.
---- { [userId: number]: { [sabotageType: string]: lastUsedClock: number } }
+-- { [userId]: { [sabotageType]: lastUsedClock } }
 local _cooldowns = {}
 --- Per-player, per-type count in the current round.
 --- { [userId: number]: { [sabotageType: string]: number } }
 local _roundUses = {}
+
+-- { [userId]: { [sabotageType]: usesThisRound } }  reset in Stop()
+local _roundUses = {}
+
+-- { [targetUserId]: { [sabotageType]: immunityExpiresAt } }  reset in Stop()
+local _targetImmunity = {}
 
 -- ── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -92,24 +97,85 @@ local function recordUsage(userId, sabotageType)
     _roundUses[userId][sabotageType] = (_roundUses[userId][sabotageType] or 0) + 1
 end
 
+local function recordRoundUse(userId, sabotageType)
+    if not _roundUses[userId] then _roundUses[userId] = {} end
+    _roundUses[userId][sabotageType] = (_roundUses[userId][sabotageType] or 0) + 1
+end
+
+local function recordImmunity(targetUserId, sabotageType)
+    if not _targetImmunity[targetUserId] then _targetImmunity[targetUserId] = {} end
+    _targetImmunity[targetUserId][sabotageType] = os.clock() + IMMUNITY_WINDOW
+end
+
+local function isImmune(targetUserId, sabotageType)
+    local perTarget = _targetImmunity[targetUserId]
+    if not perTarget then return false end
+    local expiresAt = perTarget[sabotageType]
+    if not expiresAt then return false end
+    return os.clock() < expiresAt
+end
+
+--- Counts how many offensive effects are currently active on a target.
+local function countActiveOffensiveEffects(targetUserId)
+    local count = 0
+    for _, effectKey in ipairs(OFFENSIVE_EFFECT_KEYS) do
+        local effect = _playerDataManager.GetEffect(targetUserId, effectKey)
+        if effect then
+            -- TEMPORARY_STUN has an expiresAt; check it hasn't expired
+            if effectKey == "TEMPORARY_STUN" then
+                if os.clock() < effect.expiresAt then
+                    count = count + 1
+                end
+            else
+                count = count + 1
+            end
+        end
+    end
+    return count
+end
+
 --- Generates a random 0–1 colour component table.
 local function randomColor()
     return { r = math.random(), g = math.random(), b = math.random() }
+end
+
+-- ── MIRROR_SHIELD intercept ───────────────────────────────────────────────────
+
+--- Returns true if the target has an active MIRROR_SHIELD.
+--- If so, consumes the shield, notifies the shielded player, and returns true.
+--- The caller must still consume the attacker's cooldown (not their round charge).
+--- @param attacker      Player
+--- @param targetUserId  number
+--- @param sabotageType  string
+--- @return boolean  shieldFired
+local function checkMirrorShield(attacker, targetUserId, sabotageType)
+    local shield = _playerDataManager.GetEffect(targetUserId, "MIRROR_SHIELD")
+    if not shield then return false end
+
+    -- Consume the shield (one-shot)
+    _playerDataManager.ClearEffect(targetUserId, "MIRROR_SHIELD")
+
+    local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
+    if targetPlayer then
+        _remotes.ShieldTriggered:FireClient(targetPlayer, sabotageType, attacker.Name)
+    end
+
+    _logger.info("SabotageSystem",
+        "MIRROR_SHIELD intercepted " .. sabotageType
+        .. " from " .. attacker.Name
+        .. " on UserId " .. tostring(targetUserId))
+    return true
 end
 
 -- ── Effect implementations ────────────────────────────────────────────────────
 
 local function applyPaintRandomizer(player, targetUserId)
     local c1, c2 = randomColor(), randomColor()
-
-    -- Store forced colours in PlayerData; OutfitSystem reads and applies them
-    -- on the target's next outfit submission.
     _playerDataManager.SetEffect(targetUserId, "PAINT_RANDOMIZER", {
         r1 = c1.r, g1 = c1.g, b1 = c1.b,
         r2 = c2.r, g2 = c2.g, b2 = c2.b,
     })
 
-    -- Notify the target's client for visual feedback
     local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
     if targetPlayer then
         _remotes.SabotageApplied:FireClient(targetPlayer, "PAINT_RANDOMIZER", {
@@ -124,13 +190,10 @@ end
 
 local function applyTemporaryStun(player, targetUserId)
     local expiresAt = os.clock() + STUN_DURATION
-
-    -- Store stun expiry; GameController checks this before forwarding SubmitOutfit
     _playerDataManager.SetEffect(targetUserId, "TEMPORARY_STUN", {
         expiresAt = expiresAt,
     })
 
-    -- Notify the target's client so they see the stun UI
     local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
     if targetPlayer then
         _remotes.SabotageApplied:FireClient(targetPlayer, "TEMPORARY_STUN", {
@@ -186,10 +249,10 @@ local function applyEffect(player, sabotageType, targetUserId)
     elseif sabotageType == "CLEANSE" then
         applyCleanse(player, targetUserId)
     else
-        -- Stub: log only until Phase 2 implements the effect
+        -- Phase 3 stub
         _logger.info("SabotageSystem",
             player.Name .. " used [" .. sabotageType .. "] on UserId "
-            .. tostring(targetUserId) .. " (effect stub – Phase 2)")
+            .. tostring(targetUserId) .. " (stub – Phase 3)")
     end
 end
 
@@ -214,7 +277,7 @@ function SabotageSystem.Start()
     _logger.info("SabotageSystem", "Started.")
 end
 
---- Disarms the system and clears all cooldown records for this round.
+--- Disarms the system and clears all per-round tracking tables.
 function SabotageSystem.Stop()
     _cooldowns = {}
     _roundUses = {}
@@ -224,6 +287,8 @@ end
 
 --- Validates and, if valid, applies a sabotage action.
 --- Returns (true, nil) on success or (false, errorMsg) on rejection.
+--- Note: for DEFENSIVE types (MIRROR_SHIELD, CLEANSE), targetUserId should be
+--- the initiator's own UserId; GameController enforces IsPlayerInActiveRound for both.
 --- @param player        Player
 --- @param sabotageType  string
 --- @param targetUserId  number
