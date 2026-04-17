@@ -2,7 +2,7 @@
     GameController  (Server Script – single entry point)
     ─────────────────────────────────────────────────────
     Boots the server by initialising all systems in dependency order,
-    wiring RemoteEvent handlers, and starting the RoundManager.
+    wiring RemoteEvent/Function handlers, and starting the RoundManager.
 
     Dependency graph (no cycles):
         Logger
@@ -24,12 +24,12 @@
                └─ RoundManager({all above, Remotes})
 
     Server-authoritative rules enforced here:
-        • SubmitOutfit  – phase check + stun check before forwarding
-        • SubmitVote    – phase check before forwarding
-        • UseSabotage   – phase check before forwarding
-        • TriggerAction – phase check (RUNWAY only) before forwarding
-        • StartRound    – admin-only gate (see ADMIN_USER_IDS below); IDLE guard is
-                          also enforced by RoundManager internally
+        • SubmitOutfit   – phase check + stun check before forwarding
+        • SubmitVote     – phase check before forwarding
+        • UseSabotage    – phase check + round-membership check before forwarding
+        • TriggerAction  – phase check (RUNWAY only) before forwarding
+        • StartRound     – admin-only gate (ADMIN_USER_IDS); IDLE guard in RoundManager
+        • Query hooks    – read-only RemoteFunction handlers; player data validated before query
 --]]
 
 -- ── Roblox Services ───────────────────────────────────────────────────────────
@@ -73,9 +73,37 @@ local RoundManager      = loadModule("RoundManager")
 -- Populate with real admin UserId numbers before shipping.
 local ADMIN_USER_IDS = {}  -- e.g. { [12345678] = true, [87654321] = true }
 
+-- ── Auto-loop tuning ──────────────────────────────────────────────────────────
+local MIN_PLAYERS_TO_START  = 2   -- minimum players before a round auto-starts
+local INTERMISSION_DURATION = 15  -- seconds between rounds (broadcast to clients)
+local LOOP_TICK             = 5   -- polling interval when waiting for players
+
 -- ── Remotes ───────────────────────────────────────────────────────────────────
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+
+-- Creates a remote of the given class if it doesn't already exist in Remotes.
+-- Idempotent: safe to call even when a setup script already created the remote.
+local function ensureRemote(name, class)
+    local existing = Remotes:FindFirstChild(name)
+    if existing then return existing end
+    local r    = Instance.new(class)
+    r.Name     = name
+    r.Parent   = Remotes
+    return r
+end
+
+-- ── Create auto-loop and query remotes ────────────────────────────────────────
+-- These are created here rather than in a separate setup script so GameController
+-- is fully self-sufficient.  Gameplay remotes (StartRound, SubmitOutfit, etc.)
+-- are assumed to already exist in the Remotes folder (set up in Studio).
+
+ensureRemote("IntermissionStarted",     "RemoteEvent")    -- server → clients: intermission countdown
+ensureRemote("EventRoundAnnounced",     "RemoteEvent")    -- server → clients: event-round notification
+ensureRemote("RequestProfile",          "RemoteFunction") -- client → server: IdentityProfile query
+ensureRemote("RequestDynamicsSummary",  "RemoteFunction") -- client → server: streaks + event query
+ensureRemote("RequestSabotageProfile",  "RemoteFunction") -- client → server: sabotage status query
+ensureRemote("RequestCurrentEvent",     "RemoteFunction") -- client → server: current event query
 
 -- ── Initialise systems (dependency-first order) ───────────────────────────────
 
@@ -235,6 +263,52 @@ Remotes.TriggerAction.OnServerEvent:Connect(function(player)
     PerformanceSystem.RegisterAction(player)
 end)
 
+-- ── Query: RequestProfile ─────────────────────────────────────────────────────
+-- Returns the caller's full IdentityProfile (archetype, titles, career stats,
+-- style DNA summary, rep score).  Returns nil when player data is unavailable.
+
+Remotes.RequestProfile.OnServerInvoke = function(player)
+    if not PlayerDataManager.GetPlayerData(player.UserId) then
+        Logger.warn("GameController",
+            "RequestProfile: no PlayerData for " .. player.Name .. " – returning nil.")
+        return nil
+    end
+    return IdentitySystem.GetProfile(player)
+end
+
+-- ── Query: RequestDynamicsSummary ─────────────────────────────────────────────
+-- Returns the caller's streak profile plus the active event for the round (if any).
+-- Safe at any phase; streaks are nil before the player's first round.
+
+Remotes.RequestDynamicsSummary.OnServerInvoke = function(player)
+    return {
+        streaks      = DynamicsSystem.GetStreakProfile(player.UserId),
+        currentEvent = RoundManager.GetCurrentEvent(),
+        streakLeaders = DynamicsSystem.GetStreakLeaders(),
+    }
+end
+
+-- ── Query: RequestSabotageProfile ────────────────────────────────────────────
+-- Returns the caller's per-type sabotage status (cooldowns, uses remaining).
+-- Useful for UI to grey out unavailable actions without polling the server.
+
+Remotes.RequestSabotageProfile.OnServerInvoke = function(player)
+    if not PlayerDataManager.GetPlayerData(player.UserId) then
+        Logger.warn("GameController",
+            "RequestSabotageProfile: no PlayerData for " .. player.Name .. " – returning nil.")
+        return nil
+    end
+    return SabotageSystem.GetSabotageProfile(player.UserId)
+end
+
+-- ── Query: RequestCurrentEvent ────────────────────────────────────────────────
+-- Returns the active EventResult for the current round, or nil in IDLE / standard rounds.
+-- Clients use this to show event-round banners on late join or reconnect.
+
+Remotes.RequestCurrentEvent.OnServerInvoke = function(_player)
+    return RoundManager.GetCurrentEvent()
+end
+
 -- ── Player lifecycle ──────────────────────────────────────────────────────────
 
 Players.PlayerAdded:Connect(function(player)
@@ -261,3 +335,47 @@ end
 
 RoundManager.Start()
 Logger.info("GameController", "Fashion Drip Wars is online and ready.")
+
+-- ── Auto-loop ─────────────────────────────────────────────────────────────────
+-- Polls every LOOP_TICK seconds.  When the server is IDLE and enough players are
+-- present, it broadcasts an intermission countdown then launches a new round.
+-- A single coroutine guarantees no concurrent iterations; double-start is further
+-- prevented by re-checking IDLE after the intermission wait.
+
+task.spawn(function()
+    while true do
+        task.wait(LOOP_TICK)
+
+        if RoundManager.GetCurrentState() ~= RoundManager.State.IDLE then
+            continue
+        end
+
+        local readyPlayers = Players:GetPlayers()
+        if #readyPlayers < MIN_PLAYERS_TO_START then
+            continue
+        end
+
+        Logger.info("GameController", string.format(
+            "Auto-loop: %d player(s) ready – starting in %ds.",
+            #readyPlayers, INTERMISSION_DURATION))
+        Remotes.IntermissionStarted:FireAllClients(INTERMISSION_DURATION)
+
+        task.wait(INTERMISSION_DURATION)
+
+        -- Re-check: a manual StartRound or player exodus may have changed things
+        if RoundManager.GetCurrentState() ~= RoundManager.State.IDLE then
+            continue
+        end
+
+        local current = Players:GetPlayers()
+        if #current >= MIN_PLAYERS_TO_START then
+            Logger.info("GameController",
+                "Auto-loop: launching round for " .. #current .. " player(s).")
+            RoundManager.StartRound(current)
+        else
+            Logger.info("GameController",
+                "Auto-loop: player count dropped to "
+                .. #current .. " during intermission – round cancelled.")
+        end
+    end
+end)

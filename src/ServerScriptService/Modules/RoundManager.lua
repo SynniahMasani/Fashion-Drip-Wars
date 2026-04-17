@@ -34,6 +34,7 @@
         RoundManager.StartRound(players)
         RoundManager.GetCurrentState()              -> string
         RoundManager.GetRoundNumber()               -> number
+        RoundManager.GetCurrentEvent()              -> EventResult | nil
         RoundManager.HandlePlayerLeft(userId)       -- call from GameController PlayerRemoving
         RoundManager.IsPlayerInActiveRound(userId)  -> boolean
         RoundManager.GetActiveRoundPlayers()        -> Player[]
@@ -159,7 +160,10 @@ phaseThemeSelection = function()
     if _currentEvent.type ~= "NONE" then
         _d.logger.info("RoundManager",
             "Event round: [" .. _currentEvent.type .. "] – " .. _currentEvent.description)
-        -- Extension point: fire _d.remotes.EventRoundAnnounced when client UI is ready
+        _d.remotes.EventRoundAnnounced:FireAllClients(
+            _currentEvent.type,
+            _currentEvent.description,
+            _currentEvent.data or {})
     end
 
     _phaseThread = task.delay(DURATION.THEME_SELECTION, phaseDressing)
@@ -473,6 +477,16 @@ end
 --- @return number
 function RoundManager.GetRoundNumber()
     return _roundNumber
+end
+
+--- Returns the EventResult for the current round, or nil when no event is active.
+--- Returns nil during IDLE and for NONE-type events (standard rounds).
+--- Safe to call from query handlers at any time.
+--- @return EventResult | nil
+function RoundManager.GetCurrentEvent()
+    if _currentState == RoundManager.State.IDLE then return nil end
+    if not _currentEvent or _currentEvent.type == "NONE" then return nil end
+    return _currentEvent
 end
 
 --- Called by GameController's PlayerRemoving handler.
