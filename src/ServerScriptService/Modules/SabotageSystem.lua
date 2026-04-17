@@ -53,6 +53,22 @@ local STUN_DURATION = 10 -- seconds a stun remains active
 local MIRROR_SHIELD_DURATION = 25
 local IMMUNITY_DURATION = 8
 
+-- Effect keys used across validation + cleanse logic.
+local EFFECT_TEMPORARY_STUN = "TEMPORARY_STUN"
+local EFFECT_PAINT_RANDOMIZER = "PAINT_RANDOMIZER"
+local EFFECT_STYLE_SCRAMBLE = "STYLE_SCRAMBLE"
+local EFFECT_OUTFIT_CURSE = "OUTFIT_CURSE" -- reserved for OutfitSystem integration
+local EFFECT_MIRROR_SHIELD = "MIRROR_SHIELD"
+local EFFECT_IMMUNITY_WINDOW = "IMMUNITY_WINDOW"
+
+-- Offensive effect keys that defensive CLEANSE should clear.
+local OFFENSIVE_EFFECT_KEYS = {
+    EFFECT_TEMPORARY_STUN,
+    EFFECT_PAINT_RANDOMIZER,
+    EFFECT_STYLE_SCRAMBLE,
+    EFFECT_OUTFIT_CURSE,
+}
+
 -- ── Private state ────────────────────────────────────────────────────────────
 
 local _playerDataManager = nil
@@ -66,12 +82,6 @@ local _cooldowns = {}
 --- Per-player, per-type count in the current round.
 --- { [userId: number]: { [sabotageType: string]: number } }
 local _roundUses = {}
-
--- { [userId]: { [sabotageType]: usesThisRound } }  reset in Stop()
-local _roundUses = {}
-
--- { [targetUserId]: { [sabotageType]: immunityExpiresAt } }  reset in Stop()
-local _targetImmunity = {}
 
 -- ── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -97,88 +107,36 @@ local function recordUsage(userId, sabotageType)
     _roundUses[userId][sabotageType] = (_roundUses[userId][sabotageType] or 0) + 1
 end
 
-local function recordRoundUse(userId, sabotageType)
-    if not _roundUses[userId] then _roundUses[userId] = {} end
-    _roundUses[userId][sabotageType] = (_roundUses[userId][sabotageType] or 0) + 1
-end
-
-local function recordImmunity(targetUserId, sabotageType)
-    if not _targetImmunity[targetUserId] then _targetImmunity[targetUserId] = {} end
-    _targetImmunity[targetUserId][sabotageType] = os.clock() + IMMUNITY_WINDOW
-end
-
-local function isImmune(targetUserId, sabotageType)
-    local perTarget = _targetImmunity[targetUserId]
-    if not perTarget then return false end
-    local expiresAt = perTarget[sabotageType]
-    if not expiresAt then return false end
-    return os.clock() < expiresAt
-end
-
---- Counts how many offensive effects are currently active on a target.
-local function countActiveOffensiveEffects(targetUserId)
-    local count = 0
-    for _, effectKey in ipairs(OFFENSIVE_EFFECT_KEYS) do
-        local effect = _playerDataManager.GetEffect(targetUserId, effectKey)
-        if effect then
-            -- TEMPORARY_STUN has an expiresAt; check it hasn't expired
-            if effectKey == "TEMPORARY_STUN" then
-                if os.clock() < effect.expiresAt then
-                    count = count + 1
-                end
-            else
-                count = count + 1
-            end
-        end
-    end
-    return count
-end
-
 --- Generates a random 0–1 colour component table.
 local function randomColor()
     return { r = math.random(), g = math.random(), b = math.random() }
 end
 
--- ── MIRROR_SHIELD intercept ───────────────────────────────────────────────────
-
---- Returns true if the target has an active MIRROR_SHIELD.
---- If so, consumes the shield, notifies the shielded player, and returns true.
---- The caller must still consume the attacker's cooldown (not their round charge).
---- @param attacker      Player
---- @param targetUserId  number
---- @param sabotageType  string
---- @return boolean  shieldFired
-local function checkMirrorShield(attacker, targetUserId, sabotageType)
-    local shield = _playerDataManager.GetEffect(targetUserId, "MIRROR_SHIELD")
-    if not shield then return false end
-
-    -- Consume the shield (one-shot)
-    _playerDataManager.ClearEffect(targetUserId, "MIRROR_SHIELD")
-
-    local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
-    if targetPlayer then
-        _remotes.ShieldTriggered:FireClient(targetPlayer, sabotageType, attacker.Name)
+local function getActiveTimedEffect(userId, effectKey)
+    local effect = _playerDataManager.GetEffect(userId, effectKey)
+    if not effect then return nil end
+    if effect.expiresAt and os.clock() >= effect.expiresAt then
+        _playerDataManager.ClearEffect(userId, effectKey)
+        return nil
     end
-
-    _logger.info("SabotageSystem",
-        "MIRROR_SHIELD intercepted " .. sabotageType
-        .. " from " .. attacker.Name
-        .. " on UserId " .. tostring(targetUserId))
-    return true
+    return effect
 end
 
 -- ── Effect implementations ────────────────────────────────────────────────────
 
 local function applyPaintRandomizer(player, targetUserId)
     local c1, c2 = randomColor(), randomColor()
-    _playerDataManager.SetEffect(targetUserId, "PAINT_RANDOMIZER", {
+
+    -- Store forced colours in PlayerData; OutfitSystem reads and applies them
+    -- on the target's next outfit submission.
+    _playerDataManager.SetEffect(targetUserId, EFFECT_PAINT_RANDOMIZER, {
         r1 = c1.r, g1 = c1.g, b1 = c1.b,
         r2 = c2.r, g2 = c2.g, b2 = c2.b,
     })
 
     local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
     if targetPlayer then
-        _remotes.SabotageApplied:FireClient(targetPlayer, "PAINT_RANDOMIZER", {
+        _remotes.SabotageApplied:FireClient(targetPlayer, EFFECT_PAINT_RANDOMIZER, {
             primary   = c1,
             secondary = c2,
         })
@@ -190,13 +148,15 @@ end
 
 local function applyTemporaryStun(player, targetUserId)
     local expiresAt = os.clock() + STUN_DURATION
-    _playerDataManager.SetEffect(targetUserId, "TEMPORARY_STUN", {
+
+    -- Store stun expiry; GameController checks this before forwarding SubmitOutfit
+    _playerDataManager.SetEffect(targetUserId, EFFECT_TEMPORARY_STUN, {
         expiresAt = expiresAt,
     })
 
     local targetPlayer = _playersService:GetPlayerByUserId(targetUserId)
     if targetPlayer then
-        _remotes.SabotageApplied:FireClient(targetPlayer, "TEMPORARY_STUN", {
+        _remotes.SabotageApplied:FireClient(targetPlayer, EFFECT_TEMPORARY_STUN, {
             duration = STUN_DURATION,
         })
     end
@@ -208,10 +168,10 @@ end
 
 local function applyMirrorShield(player, targetUserId)
     local expiresAt = os.clock() + MIRROR_SHIELD_DURATION
-    _playerDataManager.SetEffect(targetUserId, "MIRROR_SHIELD", {
+    _playerDataManager.SetEffect(targetUserId, EFFECT_MIRROR_SHIELD, {
         expiresAt = expiresAt,
     })
-    _remotes.SabotageApplied:FireClient(player, "MIRROR_SHIELD", {
+    _remotes.SabotageApplied:FireClient(player, EFFECT_MIRROR_SHIELD, {
         duration = MIRROR_SHIELD_DURATION,
     })
     _logger.info("SabotageSystem",
@@ -220,13 +180,13 @@ end
 
 local function applyCleanse(player, targetUserId)
     local cleared = {}
-    for _, effectName in ipairs({ "TEMPORARY_STUN", "PAINT_RANDOMIZER", "STYLE_SCRAMBLE" }) do
+    for _, effectName in ipairs(OFFENSIVE_EFFECT_KEYS) do
         if _playerDataManager.GetEffect(targetUserId, effectName) then
             _playerDataManager.ClearEffect(targetUserId, effectName)
             table.insert(cleared, effectName)
         end
     end
-    _playerDataManager.SetEffect(targetUserId, "IMMUNITY_WINDOW", {
+    _playerDataManager.SetEffect(targetUserId, EFFECT_IMMUNITY_WINDOW, {
         expiresAt = os.clock() + IMMUNITY_DURATION,
     })
     _remotes.SabotageApplied:FireClient(player, "CLEANSE", {
@@ -357,27 +317,25 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
 
     -- Defensive intercept: active mirror shield reflects offensive sabotage.
     if sabotageDef.category == "offensive" then
-        local shield = _playerDataManager.GetEffect(targetUserId, "MIRROR_SHIELD")
-        if shield and shield.expiresAt and os.clock() < shield.expiresAt then
-            _playerDataManager.ClearEffect(targetUserId, "MIRROR_SHIELD")
+        local shield = getActiveTimedEffect(targetUserId, EFFECT_MIRROR_SHIELD)
+        if shield then
+            _playerDataManager.ClearEffect(targetUserId, EFFECT_MIRROR_SHIELD)
             effectiveTargetUserId = player.UserId
             _logger.info("SabotageSystem",
                 "MIRROR_SHIELD intercepted " .. sabotageType
                 .. " from " .. player.Name .. " and reflected it.")
         end
 
-        local immunity = _playerDataManager.GetEffect(effectiveTargetUserId, "IMMUNITY_WINDOW")
-        if immunity and immunity.expiresAt and os.clock() < immunity.expiresAt then
+        local immunity = getActiveTimedEffect(effectiveTargetUserId, EFFECT_IMMUNITY_WINDOW)
+        if immunity then
             return false, "Target is temporarily immune to sabotage."
         end
     elseif sabotageType == "MIRROR_SHIELD" then
-        local existing = _playerDataManager.GetEffect(targetUserId, "MIRROR_SHIELD")
-        if existing and existing.expiresAt and os.clock() < existing.expiresAt then
+        if getActiveTimedEffect(targetUserId, EFFECT_MIRROR_SHIELD) then
             return false, "Mirror Shield is already active."
         end
     elseif sabotageType == "CLEANSE" then
-        local immunity = _playerDataManager.GetEffect(targetUserId, "IMMUNITY_WINDOW")
-        if immunity and immunity.expiresAt and os.clock() < immunity.expiresAt then
+        if getActiveTimedEffect(targetUserId, EFFECT_IMMUNITY_WINDOW) then
             return false, "Cleanse immunity is already active."
         end
     end
@@ -385,15 +343,14 @@ function SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
     -- Redundant active-effect check: reject if the same effect is already pending
     -- on the target to prevent wasted slots and confusing UI states.
     if sabotageType == "TEMPORARY_STUN" and sabotageDef.category == "offensive" then
-        local existing = _playerDataManager.GetEffect(effectiveTargetUserId, "TEMPORARY_STUN")
-        if existing and os.clock() < existing.expiresAt then
+        if getActiveTimedEffect(effectiveTargetUserId, EFFECT_TEMPORARY_STUN) then
             _logger.warn("SabotageSystem",
                 "TEMPORARY_STUN already active on UserId "
                 .. tostring(effectiveTargetUserId) .. " – rejected.")
             return false, "Target is already stunned."
         end
     elseif sabotageType == "PAINT_RANDOMIZER" and sabotageDef.category == "offensive" then
-        local existing = _playerDataManager.GetEffect(effectiveTargetUserId, "PAINT_RANDOMIZER")
+        local existing = _playerDataManager.GetEffect(effectiveTargetUserId, EFFECT_PAINT_RANDOMIZER)
         if existing then
             _logger.warn("SabotageSystem",
                 "PAINT_RANDOMIZER already pending on UserId "
