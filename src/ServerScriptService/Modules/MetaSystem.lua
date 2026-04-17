@@ -38,9 +38,12 @@
 
     ── Outfit style analysis ────────────────────────────────────────────────────
     UpdateGlobalStyleData reads OutfitData.StyleTags and maps each tag to a
-    primary style category via TAG_TO_STYLE.  Each recognised tag adds 1 point
-    to that category's round buffer.  Outfits with no recognised tags contribute
-    0.25 to every category (a balanced baseline so every submission counts).
+    primary style category via TAG_TO_STYLE.
+    To avoid compounding from duplicate/redundant tags, each outfit contributes
+    exactly 1.0 total meta weight:
+      • recognised styles   → split evenly across unique mapped categories
+      • no recognised tags  → 0.25 to each category (balanced baseline)
+    This keeps per-outfit influence bounded and consistent.
 
     ── Integration ──────────────────────────────────────────────────────────────
     JudgeSystem calls GetStyleModifier(player.DominantStyle) inside ScoreOutfit
@@ -171,31 +174,43 @@ end
 --- Safe to call with nil (no-op) — does not mutate historical data.
 --- Call once per outfit during phaseResults before scoring begins.
 ---
---- Outfits with no recognisable StyleTags contribute a balanced baseline
---- (0.25 to each category) so every submission participates in the tracking.
+--- Outfits with recognised tags contribute a total of 1.0 split across unique
+--- mapped styles. Outfits with no recognised tags contribute a balanced
+--- baseline (0.25 to each category) so every submission participates.
 ---
 --- @param outfitData  table | nil
 function MetaSystem.UpdateGlobalStyleData(outfitData)
     if not outfitData then return end
 
-    local contributed = false
+    local uniqueStyles = {}
 
     if type(outfitData.StyleTags) == "table" then
         for _, tag in ipairs(outfitData.StyleTags) do
             local style = TAG_TO_STYLE[tag]
             if style then
-                _roundBuffer[style] = _roundBuffer[style] + 1
-                contributed = true
+                uniqueStyles[style] = true
             end
         end
     end
 
+    local styleCount = 0
+    for _ in pairs(uniqueStyles) do
+        styleCount = styleCount + 1
+    end
+
     -- Outfit with no recognised tags: balanced contribution so nothing gets
     -- inflated by silent submissions
-    if not contributed then
+    if styleCount == 0 then
         for _, cat in ipairs(STYLES) do
             _roundBuffer[cat] = _roundBuffer[cat] + 0.25
         end
+        return
+    end
+
+    -- Recognised tags: one full contribution split across unique styles.
+    local share = 1 / styleCount
+    for style in pairs(uniqueStyles) do
+        _roundBuffer[style] = _roundBuffer[style] + share
     end
 end
 
