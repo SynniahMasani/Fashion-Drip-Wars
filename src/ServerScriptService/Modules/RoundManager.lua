@@ -34,6 +34,7 @@
         RoundManager.StartRound(players)
         RoundManager.GetCurrentState()              -> string
         RoundManager.GetRoundNumber()               -> number
+        RoundManager.GetCurrentEvent()              -> EventResult | nil
         RoundManager.HandlePlayerLeft(userId)       -- call from GameController PlayerRemoving
         RoundManager.IsPlayerInActiveRound(userId)  -> boolean
         RoundManager.GetActiveRoundPlayers()        -> Player[]
@@ -54,6 +55,11 @@ RoundManager.State = {
     VOTING           = "VOTING",
     RESULTS          = "RESULTS",
 }
+
+-- ── Cross-round dynamics constants ───────────────────────────────────────────
+-- Mirrors the META_SHAKEUP extra penalty in DynamicsSystem so it is visible
+-- here alongside the rest of the scoring formula.
+local SHAKEUP_EXTRA_PENALTY = -0.50
 
 -- ── Phase durations ───────────────────────────────────────────────────────────
 
@@ -76,6 +82,10 @@ local _roundPlayers = {}   -- Player[] round-start ordering source; not authorit
 -- Live membership set: entries are removed as players disconnect mid-round so
 -- systems can quickly test whether a userId is still an active participant.
 local _activePlayerSet = {}  -- { [userId: number]: Player }
+
+-- EventResult from DynamicsSystem for the current round; set in phaseThemeSelection,
+-- consumed in phaseResults scoring, nil between rounds.
+local _currentEvent = nil
 
 -- ── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -172,6 +182,19 @@ phaseThemeSelection = function()
 
     -- Select the judging panel now that the theme is known
     _d.judgeSystem.SelectJudgesForRound()
+
+    -- Select event type for this round based on recent streaks and meta trends.
+    -- Modifiers are applied during phaseResults scoring; logs event name here.
+    local metaStatuses = _d.metaSystem.GetAllStyleStatuses()
+    _currentEvent = _d.dynamicsSystem.SelectEvent(metaStatuses)
+    if _currentEvent.type ~= "NONE" then
+        _d.logger.info("RoundManager",
+            "Event round: [" .. _currentEvent.type .. "] – " .. _currentEvent.description)
+        _d.remotes.EventRoundAnnounced:FireAllClients(
+            _currentEvent.type,
+            _currentEvent.description,
+            _currentEvent.data or {})
+    end
 
     _phaseThread = task.delay(DURATION.THEME_SELECTION, phaseDressing)
 end
@@ -300,20 +323,40 @@ phaseResults = function()
         local pVoteAvg  = avgByPlayer[userId] or 0
         local perfScore = _d.performanceSystem.GetPerformanceScore(player)
 
+        -- Event: STREAK_GAUNTLET – dominant players face a stricter judging bar.
+        -- Pressure is 0 in all other event types and in normal rounds.
+        local judgePressure = _d.dynamicsSystem.GetJudgePressure(userId, _currentEvent)
+        if judgePressure ~= 0 then
+            aiScore = math.max(1.0, aiScore + judgePressure)
+        end
+
+        -- Event: META_SHAKEUP – players whose DominantStyle matches the flagged style
+        -- take an extra AI score penalty on top of MetaSystem's own OVERUSE_PENALTY.
+        if _currentEvent and _currentEvent.type == "META_SHAKEUP" then
+            local pData    = _d.playerDataManager.GetPlayerData(userId)
+            local domStyle = pData and pData.StyleDNA and pData.StyleDNA.DominantStyle or "None"
+            if domStyle == _currentEvent.data.shakeupStyle then
+                aiScore = math.max(1.0, aiScore + SHAKEUP_EXTRA_PENALTY)
+            end
+        end
+
         -- Weighted formula: 60% player vote (normalised to 10-pt scale) + 40% AI,
-        -- plus performance bonus (0–3), then scaled by the audience hype multiplier.
-        -- All capped at 10 before the hype multiply is applied.
-        local normVote  = (pVoteAvg / 5) * 10
-        local base      = normVote * 0.6 + aiScore * 0.4
-        local final     = math.floor(math.min(10.0, (base + perfScore) * hyped) * 10 + 0.5) / 10
+        -- plus performance bonus (0–3) and underdog bonus, then scaled by hype multiplier.
+        -- Underdog bonus is 0 for non-qualifying players so it has no effect in normal play.
+        local normVote      = (pVoteAvg / 5) * 10
+        local base          = normVote * 0.6 + aiScore * 0.4
+        local underdogBonus = _d.dynamicsSystem.GetUnderdogBonus(userId, _currentEvent)
+        local final = math.floor(math.min(10.0, (base + perfScore + underdogBonus) * hyped) * 10 + 0.5) / 10
 
         table.insert(finalResults, {
-            userId     = userId,
-            name       = player.Name,
-            aiScore    = aiScore,
-            playerVote = pVoteAvg,
-            perfScore  = perfScore,
-            finalScore = final,
+            userId        = userId,
+            name          = player.Name,
+            aiScore       = aiScore,
+            playerVote    = pVoteAvg,
+            perfScore     = perfScore,
+            finalScore    = final,
+            underdogBonus = underdogBonus,
+            judgePressure = judgePressure,
         })
     end
 
@@ -365,16 +408,34 @@ phaseResults = function()
         end
 
         _d.logger.info("RoundManager", string.format(
-            "  #%d %-20s  Final: %.1f  (AI: %.1f | Vote: %.1f | Perf: %.2f | Rep: %.1f [%s])",
+            "  #%d %-20s  Final: %.1f  (AI: %.1f | Vote: %.1f | Perf: %.2f | Udog: +%.2f | Rep: %.1f [%s])",
             rank, result.name, result.finalScore,
             result.aiScore, result.playerVote, result.perfScore or 0,
+            result.underdogBonus or 0,
             result.reputation or 0, result.repTier or "?"))
     end
+
+    -- Record round results in DynamicsSystem so streaks are up to date for the
+    -- NEXT round's SelectEvent() call.  Must run after ranks are assigned.
+    _d.dynamicsSystem.RecordRoundResults(finalResults)
 
     -- Final Style DNA refresh: ensures DominantStyle reflects the full round,
     -- even for players who never submitted an outfit this round (score = 0).
     for _, player in ipairs(livePlayers) do
         _d.styleDNA.RecalculateDominantStyle(player.UserId)
+    end
+
+    -- Update identity profiles (career stats, title awards) after both streaks and
+    -- StyleDNA are settled so archetypes and title checks see current state.
+    -- playerById is still in scope from the reputation loop above.
+    -- Players who left mid-round are guarded by the GetPlayerData check inside
+    -- UpdateAfterRound, consistent with the reputation-update guard above.
+    local totalRoundPlayers = #finalResults
+    for _, result in ipairs(finalResults) do
+        local player = playerById[result.userId]
+        if player then
+            _d.identitySystem.UpdateAfterRound(player, result, totalRoundPlayers)
+        end
     end
 
     -- Broadcast results to all clients
@@ -402,7 +463,8 @@ end
 --- @param deps table {
 ---   outfitSystem, votingSystem, sabotageSystem,
 ---   themeSystem, runwaySystem, judgeSystem, metaSystem, audienceSystem,
----   styleDNA, reputationSystem, playerDataManager, logger, remotes
+---   styleDNA, reputationSystem, performanceSystem, dynamicsSystem, identitySystem,
+---   playerDataManager, logger, remotes
 --- }
 function RoundManager.Init(deps)
     _d = deps
@@ -486,6 +548,16 @@ end
 --- @return number
 function RoundManager.GetRoundNumber()
     return _roundNumber
+end
+
+--- Returns the EventResult for the current round, or nil when no event is active.
+--- Returns nil during IDLE and for NONE-type events (standard rounds).
+--- Safe to call from query handlers at any time.
+--- @return EventResult | nil
+function RoundManager.GetCurrentEvent()
+    if _currentState == RoundManager.State.IDLE then return nil end
+    if not _currentEvent or _currentEvent.type == "NONE" then return nil end
+    return _currentEvent
 end
 
 --- Called by GameController's PlayerRemoving handler.

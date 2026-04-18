@@ -2,7 +2,7 @@
     GameController  (Server Script – single entry point)
     ─────────────────────────────────────────────────────
     Boots the server by initialising all systems in dependency order,
-    wiring RemoteEvent handlers, and starting the RoundManager.
+    wiring RemoteEvent/Function handlers, and starting the RoundManager.
 
     Dependency graph (no cycles):
         Logger
@@ -11,10 +11,12 @@
                ├─ MetaSystem(Logger)
                ├─ AudienceSystem(Logger)
                ├─ PerformanceSystem(Logger, Remotes)
+               ├─ DynamicsSystem(Logger)
                ├─ MaterialSystem(PlayerDataManager, Logger)
                ├─ ReputationSystem(PlayerDataManager, Logger)
                ├─ StyleDNA(PlayerDataManager, Logger)
-               │    └─ JudgeSystem(StyleDNA, MaterialSystem, ThemeSystem, MetaSystem, Logger)
+               │    ├─ JudgeSystem(StyleDNA, MaterialSystem, ThemeSystem, MetaSystem, Logger)
+               │    └─ IdentitySystem(StyleDNA, ReputationSystem, DynamicsSystem, PlayerDataManager, Logger)
                ├─ OutfitSystem(PlayerDataManager, StyleDNA, MaterialSystem, Logger)
                ├─ VotingSystem(PlayerDataManager, Logger)
                ├─ SabotageSystem(PlayerDataManager, Logger, Remotes, Players)
@@ -22,12 +24,12 @@
                └─ RoundManager({all above, Remotes})
 
     Server-authoritative rules enforced here:
-        • SubmitOutfit  – phase check + stun check before forwarding
-        • SubmitVote    – phase check before forwarding
-        • UseSabotage   – phase check before forwarding
-        • TriggerAction – phase check (RUNWAY only) before forwarding
-        • StartRound    – admin-only gate (see ADMIN_USER_IDS below); IDLE guard is
-                          also enforced by RoundManager internally
+        • SubmitOutfit   – phase check + stun check before forwarding
+        • SubmitVote     – phase check before forwarding
+        • UseSabotage    – phase check + round-membership check before forwarding
+        • TriggerAction  – phase check (RUNWAY only) before forwarding
+        • StartRound     – admin-only gate (ADMIN_USER_IDS); IDLE guard in RoundManager
+        • Query hooks    – read-only RemoteFunction handlers; player data validated before query
 --]]
 
 -- ── Roblox Services ───────────────────────────────────────────────────────────
@@ -52,6 +54,8 @@ local ThemeSystem       = loadModule("ThemeSystem")
 local MetaSystem        = loadModule("MetaSystem")
 local AudienceSystem    = loadModule("AudienceSystem")
 local PerformanceSystem = loadModule("PerformanceSystem")
+local DynamicsSystem    = loadModule("DynamicsSystem")
+local IdentitySystem    = loadModule("IdentitySystem")
 local JudgeSystem       = loadModule("JudgeSystem")
 local StyleDNA          = loadModule("StyleDNA")
 local OutfitSystem      = loadModule("OutfitSystem")
@@ -84,6 +88,29 @@ local ENABLE_BACKEND_QUERY_HOOKS = true
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 
+-- Creates a remote of the given class if it doesn't already exist in Remotes.
+-- Idempotent: safe to call even when a setup script already created the remote.
+local function ensureRemote(name, class)
+    local existing = Remotes:FindFirstChild(name)
+    if existing then return existing end
+    local r    = Instance.new(class)
+    r.Name     = name
+    r.Parent   = Remotes
+    return r
+end
+
+-- ── Create auto-loop and query remotes ────────────────────────────────────────
+-- These are created here rather than in a separate setup script so GameController
+-- is fully self-sufficient.  Gameplay remotes (StartRound, SubmitOutfit, etc.)
+-- are assumed to already exist in the Remotes folder (set up in Studio).
+
+ensureRemote("IntermissionStarted",     "RemoteEvent")    -- server → clients: intermission countdown
+ensureRemote("EventRoundAnnounced",     "RemoteEvent")    -- server → clients: event-round notification
+ensureRemote("RequestProfile",          "RemoteFunction") -- client → server: IdentityProfile query
+ensureRemote("RequestDynamicsSummary",  "RemoteFunction") -- client → server: streaks + event query
+ensureRemote("RequestSabotageProfile",  "RemoteFunction") -- client → server: sabotage status query
+ensureRemote("RequestCurrentEvent",     "RemoteFunction") -- client → server: current event query
+
 -- ── Initialise systems (dependency-first order) ───────────────────────────────
 
 Logger.info("GameController", "========================================")
@@ -95,9 +122,11 @@ ThemeSystem.Init(Logger)
 MetaSystem.Init(Logger)
 AudienceSystem.Init(Logger)
 PerformanceSystem.Init(Logger, Remotes)
+DynamicsSystem.Init(Logger)
 MaterialSystem.Init(PlayerDataManager, Logger)
 ReputationSystem.Init(PlayerDataManager, Logger)
 StyleDNA.Init(PlayerDataManager, Logger)
+IdentitySystem.Init(StyleDNA, ReputationSystem, DynamicsSystem, PlayerDataManager, Logger)
 JudgeSystem.Init(StyleDNA, MaterialSystem, ThemeSystem, MetaSystem, Logger)
 OutfitSystem.Init(PlayerDataManager, StyleDNA, MaterialSystem, Logger)
 VotingSystem.Init(PlayerDataManager, Logger)
@@ -114,6 +143,8 @@ RoundManager.Init({
     metaSystem        = MetaSystem,
     audienceSystem    = AudienceSystem,
     performanceSystem = PerformanceSystem,
+    dynamicsSystem    = DynamicsSystem,
+    identitySystem    = IdentitySystem,
     styleDNA          = StyleDNA,
     reputationSystem  = ReputationSystem,
     playerDataManager = PlayerDataManager,
