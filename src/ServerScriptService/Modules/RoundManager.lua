@@ -504,23 +504,36 @@ function RoundManager.StartRound(players)
             "StartRound called during active round (state: " .. _currentState .. ").")
         return
     end
-    if #players < 1 then
-        _d.logger.warn("RoundManager", "StartRound called with no players – aborting.")
+    -- Normalize the caller-provided list to connected unique players.
+    -- This protects auto-start/query integrations from stale references.
+    local normalizedPlayers = {}
+    local seen = {}
+    for _, player in ipairs(players or {}) do
+        if player and player.UserId and player.Parent then
+            if not seen[player.UserId] then
+                seen[player.UserId] = true
+                table.insert(normalizedPlayers, player)
+            end
+        end
+    end
+
+    if #normalizedPlayers < 1 then
+        _d.logger.warn("RoundManager", "StartRound called with no connected players – aborting.")
         return
     end
 
     _roundNumber  = _roundNumber + 1
-    _roundPlayers = players
+    _roundPlayers = normalizedPlayers
 
     -- Build the live participant set (pruned on disconnect via HandlePlayerLeft)
     _activePlayerSet = {}
-    for _, player in ipairs(players) do
+    for _, player in ipairs(normalizedPlayers) do
         _activePlayerSet[player.UserId] = player
     end
 
     _d.logger.info("RoundManager",
         "=== Round #" .. _roundNumber .. " START ==="
-        .. "  Players: " .. #players)
+        .. "  Players: " .. #normalizedPlayers)
 
     phaseLobby()
 end

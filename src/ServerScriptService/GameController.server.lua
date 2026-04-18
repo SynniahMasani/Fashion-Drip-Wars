@@ -73,10 +73,16 @@ local RoundManager      = loadModule("RoundManager")
 -- Populate with real admin UserId numbers before shipping.
 local ADMIN_USER_IDS = {}  -- e.g. { [12345678] = true, [87654321] = true }
 
--- ── Auto-loop tuning ──────────────────────────────────────────────────────────
-local MIN_PLAYERS_TO_START  = 2   -- minimum players before a round auto-starts
-local INTERMISSION_DURATION = 15  -- seconds between rounds (broadcast to clients)
-local LOOP_TICK             = 5   -- polling interval when waiting for players
+-- ── Session automation / backend query tuning ───────────────────────────────
+-- Automation is server-authoritative and intentionally conservative:
+-- it only starts rounds from IDLE, and only when enough players are present.
+local AUTO_SESSION_ENABLED      = true
+local AUTO_SESSION_MIN_PLAYERS  = 2
+local AUTO_SESSION_CHECK_SECS   = 2
+
+-- Backend query hooks are read-only by design. They should never call mutating
+-- gameplay APIs (e.g. StartRound, UpdateReputation, SetEffect, etc.).
+local ENABLE_BACKEND_QUERY_HOOKS = true
 
 -- ── Remotes ───────────────────────────────────────────────────────────────────
 
@@ -147,6 +153,31 @@ RoundManager.Init({
 })
 
 Logger.info("GameController", "All systems initialized.")
+
+-- ── Internal helpers ─────────────────────────────────────────────────────────
+
+--- Returns a fresh active-player snapshot filtered to connected players.
+--- @return Player[]
+local function getConnectedPlayers()
+    local result = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player and player.Parent == Players then
+            table.insert(result, player)
+        end
+    end
+    return result
+end
+
+--- Safe userId coercion for backend query paths.
+--- @param maybeUserId any
+--- @return number?
+local function coerceUserId(maybeUserId)
+    local userId = tonumber(maybeUserId)
+    if not userId or userId < 1 or userId ~= math.floor(userId) then
+        return nil
+    end
+    return userId
+end
 
 -- ── Remote: StartRound ────────────────────────────────────────────────────────
 -- Restricted to admin UserId(s) in ADMIN_USER_IDS.  Any other client firing
@@ -291,50 +322,44 @@ Remotes.TriggerAction.OnServerEvent:Connect(function(player)
     PerformanceSystem.RegisterAction(player)
 end)
 
--- ── Query: RequestProfile ─────────────────────────────────────────────────────
--- Returns the caller's full IdentityProfile (archetype, titles, career stats,
--- style DNA summary, rep score).  Returns nil when player data is unavailable.
+-- ── Optional backend query hooks (read-only, validated) ─────────────────────
 
-Remotes.RequestProfile.OnServerInvoke = function(player)
-    if not PlayerDataManager.GetPlayerData(player.UserId) then
-        Logger.warn("GameController",
-            "RequestProfile: no PlayerData for " .. player.Name .. " – returning nil.")
-        return nil
+if ENABLE_BACKEND_QUERY_HOOKS then
+    local getSessionSnapshot = Remotes:FindFirstChild("GetSessionSnapshot")
+    if getSessionSnapshot and getSessionSnapshot:IsA("RemoteFunction") then
+        getSessionSnapshot.OnServerInvoke = function(_player)
+            local activePlayers = RoundManager.GetActiveRoundPlayers()
+            local connected = getConnectedPlayers()
+            return {
+                state             = RoundManager.GetCurrentState(),
+                roundNumber       = RoundManager.GetRoundNumber(),
+                connectedPlayers  = #connected,
+                activeRoundPlayers = #activePlayers,
+            }
+        end
+        Logger.info("GameController", "Bound backend query hook: GetSessionSnapshot")
     end
-    return IdentitySystem.GetProfile(player)
-end
 
--- ── Query: RequestDynamicsSummary ─────────────────────────────────────────────
--- Returns the caller's streak profile plus the active event for the round (if any).
--- Safe at any phase; streaks are nil before the player's first round.
-
-Remotes.RequestDynamicsSummary.OnServerInvoke = function(player)
-    return {
-        streaks      = DynamicsSystem.GetStreakProfile(player.UserId),
-        currentEvent = RoundManager.GetCurrentEvent(),
-        streakLeaders = DynamicsSystem.GetStreakLeaders(),
-    }
-end
-
--- ── Query: RequestSabotageProfile ────────────────────────────────────────────
--- Returns the caller's per-type sabotage status (cooldowns, uses remaining).
--- Useful for UI to grey out unavailable actions without polling the server.
-
-Remotes.RequestSabotageProfile.OnServerInvoke = function(player)
-    if not PlayerDataManager.GetPlayerData(player.UserId) then
-        Logger.warn("GameController",
-            "RequestSabotageProfile: no PlayerData for " .. player.Name .. " – returning nil.")
-        return nil
+    local getPlayerProfile = Remotes:FindFirstChild("GetPlayerProfile")
+    if getPlayerProfile and getPlayerProfile:IsA("RemoteFunction") then
+        getPlayerProfile.OnServerInvoke = function(requester, requestedUserId)
+            -- Do not trust client input; default to the requester profile.
+            local userId = coerceUserId(requestedUserId) or requester.UserId
+            if userId ~= requester.UserId and not ADMIN_USER_IDS[requester.UserId] then
+                Logger.warn("GameController",
+                    requester.Name .. " attempted cross-user profile query without authorization.")
+                userId = requester.UserId
+            end
+            local styleProfile = StyleDNA.GetPlayerStyle(userId)
+            local repProfile = ReputationSystem.GetReputation(userId)
+            return {
+                userId = userId,
+                style = styleProfile,
+                reputation = repProfile,
+            }
+        end
+        Logger.info("GameController", "Bound backend query hook: GetPlayerProfile")
     end
-    return SabotageSystem.GetSabotageProfile(player.UserId)
-end
-
--- ── Query: RequestCurrentEvent ────────────────────────────────────────────────
--- Returns the active EventResult for the current round, or nil in IDLE / standard rounds.
--- Clients use this to show event-round banners on late join or reconnect.
-
-Remotes.RequestCurrentEvent.OnServerInvoke = function(_player)
-    return RoundManager.GetCurrentEvent()
 end
 
 -- ── Player lifecycle ──────────────────────────────────────────────────────────
@@ -364,46 +389,31 @@ end
 RoundManager.Start()
 Logger.info("GameController", "Fashion Drip Wars is online and ready.")
 
--- ── Auto-loop ─────────────────────────────────────────────────────────────────
--- Polls every LOOP_TICK seconds.  When the server is IDLE and enough players are
--- present, it broadcasts an intermission countdown then launches a new round.
--- A single coroutine guarantees no concurrent iterations; double-start is further
--- prevented by re-checking IDLE after the intermission wait.
-
-task.spawn(function()
-    while true do
-        task.wait(LOOP_TICK)
-
-        if RoundManager.GetCurrentState() ~= RoundManager.State.IDLE then
-            continue
-        end
-
-        local readyPlayers = Players:GetPlayers()
-        if #readyPlayers < MIN_PLAYERS_TO_START then
-            continue
-        end
-
-        Logger.info("GameController", string.format(
-            "Auto-loop: %d player(s) ready – starting in %ds.",
-            #readyPlayers, INTERMISSION_DURATION))
-        Remotes.IntermissionStarted:FireAllClients(INTERMISSION_DURATION)
-
-        task.wait(INTERMISSION_DURATION)
-
-        -- Re-check: a manual StartRound or player exodus may have changed things
-        if RoundManager.GetCurrentState() ~= RoundManager.State.IDLE then
-            continue
-        end
-
-        local current = Players:GetPlayers()
-        if #current >= MIN_PLAYERS_TO_START then
-            Logger.info("GameController",
-                "Auto-loop: launching round for " .. #current .. " player(s).")
-            RoundManager.StartRound(current)
-        else
-            Logger.info("GameController",
-                "Auto-loop: player count dropped to "
-                .. #current .. " during intermission – round cancelled.")
-        end
+-- Single instance guard: prevents overlapping auto-start loops.
+local _autoSessionLoopStarted = false
+local function startAutoSessionLoop()
+    if _autoSessionLoopStarted or not AUTO_SESSION_ENABLED then
+        return
     end
-end)
+    _autoSessionLoopStarted = true
+
+    task.spawn(function()
+        Logger.info("GameController", string.format(
+            "Auto session loop enabled (min players=%d, check=%ss).",
+            AUTO_SESSION_MIN_PLAYERS, AUTO_SESSION_CHECK_SECS))
+
+        while _autoSessionLoopStarted do
+            task.wait(AUTO_SESSION_CHECK_SECS)
+
+            -- Never attempt a new start while the state machine is active.
+            if RoundManager.GetCurrentState() == RoundManager.State.IDLE then
+                local connected = getConnectedPlayers()
+                if #connected >= AUTO_SESSION_MIN_PLAYERS then
+                    RoundManager.StartRound(connected)
+                end
+            end
+        end
+    end)
+end
+
+startAutoSessionLoop()
