@@ -72,7 +72,7 @@ local _isRunning    = false
 local _currentState = RoundManager.State.IDLE
 local _roundNumber  = 0
 local _phaseThread  = nil  -- cancellable task thread for timed transitions
-local _roundPlayers = {}   -- Player[] snapshot at round start (never pruned)
+local _roundPlayers = {}   -- Player[] round-start ordering source; not authoritative for live membership
 -- Live membership set: entries are removed as players disconnect mid-round so
 -- systems can quickly test whether a userId is still an active participant.
 local _activePlayerSet = {}  -- { [userId: number]: Player }
@@ -84,6 +84,36 @@ local function cancelPhaseTimer()
         task.cancel(_phaseThread)
         _phaseThread = nil
     end
+end
+
+--- Returns round participants that are still active, preserving round-start order.
+--- This is the authoritative participant list for active-phase logic.
+--- @return Player[]
+local function getLiveRoundPlayers()
+    local result = {}
+    for _, player in ipairs(_roundPlayers) do
+        if player and _activePlayerSet[player.UserId] and player.Parent then
+            table.insert(result, player)
+        end
+    end
+    return result
+end
+
+--- Ends the current round early when no active participants remain.
+--- Safe early-termination avoids runway/voting/results executing on stale data.
+--- @param reason string
+local function terminateRoundNoParticipants(reason)
+    cancelPhaseTimer()
+    _d.outfitSystem.Stop()
+    if _d.votingSystem.IsVotingOpen() then
+        _d.votingSystem.CloseVoting()
+    end
+    _d.votingSystem.Stop()
+    _d.sabotageSystem.Stop()
+    _d.runwaySystem.Stop()
+    setState(RoundManager.State.IDLE, 0)
+    _d.logger.info("RoundManager",
+        "Round #" .. _roundNumber .. " ended early (no active participants): " .. reason)
 end
 
 --- Lightweight outfit score (0–10) for real-time audience updates during runway.
@@ -151,14 +181,20 @@ end
 phaseDressing = function()
     setState(RoundManager.State.DRESSING, DURATION.DRESSING)
 
+    local livePlayers = getLiveRoundPlayers()
+    if #livePlayers == 0 then
+        terminateRoundNoParticipants("before dressing start")
+        return
+    end
+
     -- Clear last round's outfits and performance records so stale data can't carry over
-    _d.outfitSystem.ClearRoundOutfits(_roundPlayers)
+    _d.outfitSystem.ClearRoundOutfits(livePlayers)
     _d.performanceSystem.ClearRound()
 
     -- Flush round-scoped sabotage effects (e.g. PAINT_RANDOMIZER that was set
     -- but never consumed because the player never submitted an outfit, or a
     -- TEMPORARY_STUN whose timer crossed a round boundary).
-    for _, player in ipairs(_roundPlayers) do
+    for _, player in ipairs(livePlayers) do
         _d.playerDataManager.ClearAllEffects(player.UserId)
     end
 
@@ -170,6 +206,10 @@ phaseDressing = function()
 
     _phaseThread = task.delay(DURATION.DRESSING, function()
         _d.outfitSystem.Stop()
+        if #getLiveRoundPlayers() == 0 then
+            terminateRoundNoParticipants("all players left during dressing")
+            return
+        end
         phaseRunway()
     end)
 end
@@ -177,13 +217,19 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 
 phaseRunway = function()
+    local livePlayers = getLiveRoundPlayers()
+    if #livePlayers == 0 then
+        terminateRoundNoParticipants("before runway start")
+        return
+    end
+
     setState(RoundManager.State.RUNWAY, 0)  -- duration is player-count dependent
     _d.audienceSystem.StartRunway()
     _d.logger.info("RoundManager", "Runway phase starting.")
 
     -- RunwaySystem drives timing internally; calls the callbacks per turn and on completion
     _d.runwaySystem.StartRunway(
-        _roundPlayers,
+        livePlayers,
         function(player)  -- onTurnStarted: update audience and open performance windows
             local outfit = _d.outfitSystem.GetPlayerOutfit(player.UserId)
             local score  = quickOutfitScore(outfit)
@@ -199,10 +245,16 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 
 phaseVoting = function()
+    local livePlayers = getLiveRoundPlayers()
+    if #livePlayers == 0 then
+        terminateRoundNoParticipants("before voting start")
+        return
+    end
+
     setState(RoundManager.State.VOTING, DURATION.VOTING)
 
     _d.votingSystem.Start()
-    _d.votingSystem.OpenVoting(_roundPlayers, _roundPlayers)
+    _d.votingSystem.OpenVoting(livePlayers, livePlayers)
     _d.logger.info("RoundManager", "Voting phase – " .. DURATION.VOTING .. "s.")
 
     _phaseThread = task.delay(DURATION.VOTING, phaseResults)
@@ -212,6 +264,12 @@ end
 
 phaseResults = function()
     _d.votingSystem.CloseVoting()
+    local livePlayers = getLiveRoundPlayers()
+    if #livePlayers == 0 then
+        terminateRoundNoParticipants("before results scoring")
+        return
+    end
+
     setState(RoundManager.State.RESULTS, DURATION.RESULTS)
 
     local voteTally = _d.votingSystem.TallyVotes()  -- []{userId,voteCount,totalStars,average}
@@ -224,7 +282,7 @@ phaseResults = function()
 
     -- Record this round's outfit styles in the meta buffer (before scoring so
     -- GetStyleModifier reads only historical data, not this round's submissions)
-    for _, p in ipairs(_roundPlayers) do
+    for _, p in ipairs(livePlayers) do
         local o = _d.outfitSystem.GetPlayerOutfit(p.UserId)
         if o then _d.metaSystem.UpdateGlobalStyleData(o) end
     end
@@ -235,7 +293,7 @@ phaseResults = function()
 
     -- Combine player votes with JudgeSystem panel scores (AI = 40% of final)
     local finalResults = {}
-    for _, player in ipairs(_roundPlayers) do
+    for _, player in ipairs(livePlayers) do
         local userId    = player.UserId
         local outfit    = _d.outfitSystem.GetPlayerOutfit(userId)
         local aiScore   = _d.judgeSystem.ScoreOutfit(player, outfit)
@@ -265,7 +323,7 @@ phaseResults = function()
 
     -- Build a UserId → Player lookup so we can pass Player objects to subsystems
     local playerById = {}
-    for _, player in ipairs(_roundPlayers) do
+    for _, player in ipairs(livePlayers) do
         playerById[player.UserId] = player
     end
 
@@ -291,7 +349,7 @@ phaseResults = function()
                 local roundResult = {
                     userId       = result.userId,
                     rank         = rank,
-                    totalPlayers = #_roundPlayers,
+                    totalPlayers = #livePlayers,
                     finalScore   = result.finalScore,
                     playerVote   = result.playerVote,
                     aiScore      = result.aiScore,
@@ -315,7 +373,7 @@ phaseResults = function()
 
     -- Final Style DNA refresh: ensures DominantStyle reflects the full round,
     -- even for players who never submitted an outfit this round (score = 0).
-    for _, player in ipairs(_roundPlayers) do
+    for _, player in ipairs(livePlayers) do
         _d.styleDNA.RecalculateDominantStyle(player.UserId)
     end
 
@@ -384,23 +442,36 @@ function RoundManager.StartRound(players)
             "StartRound called during active round (state: " .. _currentState .. ").")
         return
     end
-    if #players < 1 then
-        _d.logger.warn("RoundManager", "StartRound called with no players – aborting.")
+    -- Normalize the caller-provided list to connected unique players.
+    -- This protects auto-start/query integrations from stale references.
+    local normalizedPlayers = {}
+    local seen = {}
+    for _, player in ipairs(players or {}) do
+        if player and player.UserId and player.Parent then
+            if not seen[player.UserId] then
+                seen[player.UserId] = true
+                table.insert(normalizedPlayers, player)
+            end
+        end
+    end
+
+    if #normalizedPlayers < 1 then
+        _d.logger.warn("RoundManager", "StartRound called with no connected players – aborting.")
         return
     end
 
     _roundNumber  = _roundNumber + 1
-    _roundPlayers = players
+    _roundPlayers = normalizedPlayers
 
     -- Build the live participant set (pruned on disconnect via HandlePlayerLeft)
     _activePlayerSet = {}
-    for _, player in ipairs(players) do
+    for _, player in ipairs(normalizedPlayers) do
         _activePlayerSet[player.UserId] = player
     end
 
     _d.logger.info("RoundManager",
         "=== Round #" .. _roundNumber .. " START ==="
-        .. "  Players: " .. #players)
+        .. "  Players: " .. #normalizedPlayers)
 
     phaseLobby()
 end
@@ -442,11 +513,7 @@ end
 --- Returns an empty table when no round is in progress.
 --- @return Player[]
 function RoundManager.GetActiveRoundPlayers()
-    local result = {}
-    for _, player in pairs(_activePlayerSet) do
-        table.insert(result, player)
-    end
-    return result
+    return getLiveRoundPlayers()
 end
 
 return RoundManager

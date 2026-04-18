@@ -69,6 +69,17 @@ local RoundManager      = loadModule("RoundManager")
 -- Populate with real admin UserId numbers before shipping.
 local ADMIN_USER_IDS = {}  -- e.g. { [12345678] = true, [87654321] = true }
 
+-- ── Session automation / backend query tuning ───────────────────────────────
+-- Automation is server-authoritative and intentionally conservative:
+-- it only starts rounds from IDLE, and only when enough players are present.
+local AUTO_SESSION_ENABLED      = true
+local AUTO_SESSION_MIN_PLAYERS  = 2
+local AUTO_SESSION_CHECK_SECS   = 2
+
+-- Backend query hooks are read-only by design. They should never call mutating
+-- gameplay APIs (e.g. StartRound, UpdateReputation, SetEffect, etc.).
+local ENABLE_BACKEND_QUERY_HOOKS = true
+
 -- ── Remotes ───────────────────────────────────────────────────────────────────
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
@@ -111,6 +122,31 @@ RoundManager.Init({
 })
 
 Logger.info("GameController", "All systems initialized.")
+
+-- ── Internal helpers ─────────────────────────────────────────────────────────
+
+--- Returns a fresh active-player snapshot filtered to connected players.
+--- @return Player[]
+local function getConnectedPlayers()
+    local result = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player and player.Parent == Players then
+            table.insert(result, player)
+        end
+    end
+    return result
+end
+
+--- Safe userId coercion for backend query paths.
+--- @param maybeUserId any
+--- @return number?
+local function coerceUserId(maybeUserId)
+    local userId = tonumber(maybeUserId)
+    if not userId or userId < 1 or userId ~= math.floor(userId) then
+        return nil
+    end
+    return userId
+end
 
 -- ── Remote: StartRound ────────────────────────────────────────────────────────
 -- Restricted to admin UserId(s) in ADMIN_USER_IDS.  Any other client firing
@@ -198,14 +234,42 @@ Remotes.UseSabotage.OnServerEvent:Connect(function(player, sabotageType, targetU
             player.Name .. " is not an active round participant – sabotage rejected.")
         return
     end
-    if not RoundManager.IsPlayerInActiveRound(targetUserId) then
+
+    -- Resolve targeting mode from server-side sabotage metadata.
+    -- Do not trust the client to declare whether a sabotage is self-target.
+    local sabotageMeta = SabotageSystem.GetSabotageTypeMeta(sabotageType)
+    if not sabotageMeta then
         Logger.warn("GameController",
-            "Sabotage target UserId " .. tostring(targetUserId)
-            .. " is not an active round participant – rejected.")
+            player.Name .. " attempted unknown sabotage '" .. tostring(sabotageType) .. "' – rejected.")
         return
     end
 
-    local ok, err = SabotageSystem.ValidateSabotage(player, sabotageType, targetUserId)
+    local resolvedTargetUserId = nil
+    if sabotageMeta.targetMode == "self" then
+        -- Defensive abilities are always self-targeted.
+        if targetUserId ~= nil and tonumber(targetUserId) and tonumber(targetUserId) ~= player.UserId then
+            Logger.warn("GameController",
+                player.Name .. " sent mismatched self-target sabotage payload – rejected.")
+            return
+        end
+        resolvedTargetUserId = player.UserId
+    else
+        -- Offensive abilities must provide a valid active target.
+        resolvedTargetUserId = tonumber(targetUserId)
+        if not resolvedTargetUserId then
+            Logger.warn("GameController",
+                player.Name .. " sent sabotage without a valid targetUserId – rejected.")
+            return
+        end
+        if not RoundManager.IsPlayerInActiveRound(resolvedTargetUserId) then
+            Logger.warn("GameController",
+                "Sabotage target UserId " .. tostring(resolvedTargetUserId)
+                .. " is not an active round participant – rejected.")
+            return
+        end
+    end
+
+    local ok, err = SabotageSystem.ValidateSabotage(player, sabotageType, resolvedTargetUserId)
     if not ok then
         Logger.warn("GameController",
             "Sabotage rejected for " .. player.Name .. ": " .. tostring(err))
@@ -226,6 +290,46 @@ Remotes.TriggerAction.OnServerEvent:Connect(function(player)
     end
     PerformanceSystem.RegisterAction(player)
 end)
+
+-- ── Optional backend query hooks (read-only, validated) ─────────────────────
+
+if ENABLE_BACKEND_QUERY_HOOKS then
+    local getSessionSnapshot = Remotes:FindFirstChild("GetSessionSnapshot")
+    if getSessionSnapshot and getSessionSnapshot:IsA("RemoteFunction") then
+        getSessionSnapshot.OnServerInvoke = function(_player)
+            local activePlayers = RoundManager.GetActiveRoundPlayers()
+            local connected = getConnectedPlayers()
+            return {
+                state             = RoundManager.GetCurrentState(),
+                roundNumber       = RoundManager.GetRoundNumber(),
+                connectedPlayers  = #connected,
+                activeRoundPlayers = #activePlayers,
+            }
+        end
+        Logger.info("GameController", "Bound backend query hook: GetSessionSnapshot")
+    end
+
+    local getPlayerProfile = Remotes:FindFirstChild("GetPlayerProfile")
+    if getPlayerProfile and getPlayerProfile:IsA("RemoteFunction") then
+        getPlayerProfile.OnServerInvoke = function(requester, requestedUserId)
+            -- Do not trust client input; default to the requester profile.
+            local userId = coerceUserId(requestedUserId) or requester.UserId
+            if userId ~= requester.UserId and not ADMIN_USER_IDS[requester.UserId] then
+                Logger.warn("GameController",
+                    requester.Name .. " attempted cross-user profile query without authorization.")
+                userId = requester.UserId
+            end
+            local styleProfile = StyleDNA.GetPlayerStyle(userId)
+            local repProfile = ReputationSystem.GetReputation(userId)
+            return {
+                userId = userId,
+                style = styleProfile,
+                reputation = repProfile,
+            }
+        end
+        Logger.info("GameController", "Bound backend query hook: GetPlayerProfile")
+    end
+end
 
 -- ── Player lifecycle ──────────────────────────────────────────────────────────
 
@@ -253,3 +357,32 @@ end
 
 RoundManager.Start()
 Logger.info("GameController", "Fashion Drip Wars is online and ready.")
+
+-- Single instance guard: prevents overlapping auto-start loops.
+local _autoSessionLoopStarted = false
+local function startAutoSessionLoop()
+    if _autoSessionLoopStarted or not AUTO_SESSION_ENABLED then
+        return
+    end
+    _autoSessionLoopStarted = true
+
+    task.spawn(function()
+        Logger.info("GameController", string.format(
+            "Auto session loop enabled (min players=%d, check=%ss).",
+            AUTO_SESSION_MIN_PLAYERS, AUTO_SESSION_CHECK_SECS))
+
+        while _autoSessionLoopStarted do
+            task.wait(AUTO_SESSION_CHECK_SECS)
+
+            -- Never attempt a new start while the state machine is active.
+            if RoundManager.GetCurrentState() == RoundManager.State.IDLE then
+                local connected = getConnectedPlayers()
+                if #connected >= AUTO_SESSION_MIN_PLAYERS then
+                    RoundManager.StartRound(connected)
+                end
+            end
+        end
+    end)
+end
+
+startAutoSessionLoop()

@@ -82,6 +82,7 @@ local COMBO_MAX       = 2.0   -- multiplier ceiling
 
 -- Anti-spam: must not exceed WINDOW_COUNT actions per turn
 local MAX_ACTIONS = WINDOW_COUNT
+local ACTION_COOLDOWN = 0.12 -- seconds between accepted action attempts
 
 -- Score ceiling applied before returning to RoundManager
 local MAX_PERF_SCORE = 3.0
@@ -102,6 +103,7 @@ local _remotes = nil
 --   consecutiveHits number      current combo streak
 --   comboMultiplier number
 --   score           number      accumulated raw score (pre-cap)
+--   lastActionAt    number      os.clock() timestamp of most recent accepted attempt
 --   schedThread     thread      task thread running the window loop
 local _activeTurn = nil
 
@@ -156,6 +158,7 @@ function PerformanceSystem.StartPerformance(player)
         consecutiveHits = 0,
         comboMultiplier = 1.0,
         score           = 0,
+        lastActionAt    = 0,
         schedThread     = nil,
     }
     _activeTurn = state
@@ -215,6 +218,14 @@ function PerformanceSystem.RegisterAction(player)
 
     local state = _activeTurn
 
+    local now = os.clock()
+    if state.lastActionAt > 0 and (now - state.lastActionAt) < ACTION_COOLDOWN then
+        _logger.warn("PerformanceSystem", string.format(
+            "%s action throttled (%.2fs cooldown).", player.Name, ACTION_COOLDOWN))
+        return "Blocked", 0
+    end
+    state.lastActionAt = now
+
     -- Anti-spam guard
     if state.actionsUsed >= MAX_ACTIONS then
         _logger.warn("PerformanceSystem", string.format(
@@ -255,7 +266,8 @@ function PerformanceSystem.RegisterAction(player)
         state.comboMultiplier = math.min(COMBO_MAX,
             1.0 + (state.consecutiveHits - 1) * COMBO_INCREMENT)
 
-        local bonus = baseBonus * state.comboMultiplier
+        local remaining = math.max(0, MAX_PERF_SCORE - state.score)
+        local bonus = math.min(baseBonus * state.comboMultiplier, remaining)
         state.score = state.score + bonus
 
         _logger.info("PerformanceSystem", string.format(
